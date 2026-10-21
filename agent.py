@@ -25,8 +25,9 @@ client = OpenAI(
 FAST_MODEL = "nvidia/Nemotron-3_5-Lightning"
 SMART_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
-READ_TOOLS = {"list_reservations", "list_menus", "sales_summary"}
+READ_TOOLS = {"get_settings", "list_reservations", "list_menus", "sales_summary"}
 WRITE_TOOLS = {
+    "update_settings",
     "add_reservation", "update_reservation", "cancel_reservation",
     "add_day_off", "create_menu", "create_payment_link", "record_onsite_payment",
 }
@@ -54,6 +55,12 @@ TIME = {"type": "string", "description": "時刻 HH:MM（24時間）"}
 RID = {"type": "string", "description": "予約番号（list_reservations で調べる）"}
 
 TOOL_SPECS = [
+    _fn("get_settings", "国・通貨・時間帯・言語の設定を見る。"),
+    _fn("update_settings", "国・通貨・時間帯・言語の設定を変える。最初の設定で使う。",
+        {"country": {"type": "string", "description": "国コード2文字（例: JP, US）"},
+         "currency": {"type": "string", "description": "通貨コード3文字（例: JPY, USD）"},
+         "timezone": {"type": "string", "description": "時間帯（例: Asia/Tokyo, America/New_York）"},
+         "language": {"type": "string", "description": "言語（例: ja-JP, en-US）"}}),
     _fn("list_reservations", "予約を見る。日付やお客さんの名前で絞れる。",
         {"date": DATE, "customer_name": {"type": "string"}}),
     _fn("add_reservation", "予約を入れる。",
@@ -68,7 +75,8 @@ TOOL_SPECS = [
     _fn("cancel_reservation", "予約を取り消す。", {"reservation_id": RID}, ["reservation_id"]),
     _fn("add_day_off", "お休みの日を入れる。", {"date": DATE}, ["date"]),
     _fn("create_menu", "メニューを作る。",
-        {"name": {"type": "string"}, "minutes": {"type": "integer"}, "price": {"type": "integer", "description": "円"}},
+        {"name": {"type": "string"}, "minutes": {"type": "integer"},
+         "price": {"type": "number", "description": "設定した通貨での普通の金額（例: 5000円なら5000、50ドルなら50）"}},
         ["name", "minutes", "price"]),
     _fn("list_menus", "メニューの一覧を見る。"),
     _fn("sales_summary", "期間の売り上げを集計する。",
@@ -76,16 +84,19 @@ TOOL_SPECS = [
     _fn("create_payment_link", "カード前払いの予約に、お客さん用の支払いリンクを作る。",
         {"reservation_id": RID}, ["reservation_id"]),
     _fn("record_onsite_payment", "現地払いでお金を受け取ったことを記録する。",
-        {"reservation_id": RID, "amount": {"type": "integer", "description": "受け取った金額（円）"}},
+        {"reservation_id": RID, "amount": {"type": "number", "description": "受け取った金額（設定した通貨での普通の金額）"}},
         ["reservation_id", "amount"]),
 ]
 
 
 def _system_prompt():
-    now = datetime.now()
-    today = f"{now:%Y-%m-%d}（{WEEKDAYS[now.weekday()]}曜日）"
+    s = tools.get_settings()["settings"]
+    now = tools.now()  # 設定した時間帯の現在時刻（サーバーの時計に左右されない）
+    today = f"{now:%Y-%m-%d %H:%M}（{WEEKDAYS[now.weekday()]}曜日）"
     return f"""あなたは「ご予約ちゃん」です。目の不自由なマッサージ師の方の、予約と売り上げの管理を音声で手伝います。
-今日は {today} です。「明日」「来週の木曜」などはこの日付から計算してください。
+現在は {today}、時間帯は {s['timezone']} です。「明日」「来週の木曜」などはこの日付から計算してください。
+国は {s['country']}、通貨は {s['currency']}、話す言語は {s['language']} です。
+金額はツールの結果にある display の形で読み上げてください。
 
 守ること:
 - 返事はすべて読み上げられます。短く、丁寧な日本語で。記号・表・箇条書き・絵文字は使わない。
@@ -105,6 +116,9 @@ def _run_tool(name, args):
         return getattr(tools, name)(**args)
     except (ValueError, TypeError) as e:
         return {"ok": False, "error": str(e)}
+    except Exception as e:
+        print(f"[ツールのエラー] {name}: {e!r}")  # 開発者向けの記録
+        return {"ok": False, "error": "保存に失敗しました。もう一度お試しください。"}
 
 
 def make_confirmation(name, args):
