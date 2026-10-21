@@ -1,7 +1,7 @@
 """
 ご予約ちゃん — Nemotron とつなぐ部分
 
-- Lightning: 毎回の発話を読んで、どのツールを呼ぶか決める（速くて安い）
+- Super:     毎回の発話を読んで、どのツールを呼ぶか決める（Lightning はツールを呼ばずに作り話をするので使わない）
 - Super:     お金や予約が変わる操作の前に、本人に読み上げる確認文を作る
 
 お金や予約が変わるツールは、本人が「はい」と言うまで実行しない。
@@ -22,8 +22,13 @@ client = OpenAI(
     api_key=os.environ["NEBIUS_API_KEY"],
 )
 
-FAST_MODEL = "nvidia/Nemotron-3_5-Lightning"
 SMART_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+# ツール選択も Super に任せる。Lightning は「明日の予約は？」「今月の売り上げは？」で
+# ツールを呼ばずに会話の記憶から予約や金額を作って答えることが多かった（8回中7回）。
+# tool_choice="required" で強制すると1回の返答にツール呼び出しが数百個並び、
+# 挨拶しただけで書き込み系の確認が出たので、それも使えない。
+# Super は毎回ツールを呼び、1問3〜5秒だった（2026-10-21 に確認）。
+FAST_MODEL = SMART_MODEL
 
 READ_TOOLS = {"get_settings", "list_reservations", "list_menus", "sales_summary"}
 WRITE_TOOLS = {
