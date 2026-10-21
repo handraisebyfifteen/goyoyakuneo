@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# お客さんの名前が入るので公開しない
+data.json
+data.json.tmp
+*.tmp
+
+# 秘密のキー
+.env
