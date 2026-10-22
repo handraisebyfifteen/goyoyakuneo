@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 高コントラスト・大きめの文字・飾りの少ない見た目。ライト / ダーク両対応 */
+@layer base {
+  :root {
+    --background: 40 20% 98%;
+    --foreground: 220 20% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 12%;
+    --primary: 215 70% 32%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 40 15% 92%;
+    --secondary-foreground: 220 20% 12%;
+    --muted: 40 15% 92%;
+    --muted-foreground: 220 10% 35%;
+    --accent: 150 40% 90%;
+    --accent-foreground: 150 50% 15%;
+    --destructive: 0 70% 40%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 15% 78%;
+    --input: 220 15% 78%;
+    --ring: 215 70% 32%;
+    --radius: 0.75rem;
+  }
+  .dark, [data-theme="dark"] {
+    --background: 220 20% 8%;
+    --foreground: 40 20% 96%;
+    --card: 220 18% 12%;
+    --card-foreground: 40 20% 96%;
+    --primary: 210 80% 70%;
+    --primary-foreground: 220 30% 8%;
+    --secondary: 220 15% 20%;
+    --secondary-foreground: 40 20% 96%;
+    --muted: 220 15% 20%;
+    --muted-foreground: 40 10% 75%;
+    --accent: 150 30% 22%;
+    --accent-foreground: 150 40% 90%;
+    --destructive: 0 70% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 12% 32%;
+    --input: 220 12% 32%;
+    --ring: 210 80% 70%;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --background: 220 20% 8%;
+      --foreground: 40 20% 96%;
+      --card: 220 18% 12%;
+      --card-foreground: 40 20% 96%;
+      --primary: 210 80% 70%;
+      --primary-foreground: 220 30% 8%;
+      --secondary: 220 15% 20%;
+      --secondary-foreground: 40 20% 96%;
+      --muted: 220 15% 20%;
+      --muted-foreground: 40 10% 75%;
+      --accent: 150 30% 22%;
+      --accent-foreground: 150 40% 90%;
+      --destructive: 0 70% 60%;
+      --destructive-foreground: 0 0% 100%;
+      --border: 220 12% 32%;
+      --input: 220 12% 32%;
+      --ring: 210 80% 70%;
+      color-scheme: dark;
+    }
+  }
+  * { @apply border-border; }
+  html { font-size: 18px; }
+  body { @apply bg-background text-foreground antialiased; }
+  :focus-visible { outline: 3px solid hsl(var(--ring)); outline-offset: 3px; }
+  .sr-only-focusable:focus { @apply not-sr-only; }
+}

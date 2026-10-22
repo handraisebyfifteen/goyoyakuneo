@@ -1,0 +1,51 @@
+import { useMemo, useState } from "react";
+import { Link, useLocation } from "wouter";
+import { Layout } from "@/components/Layout";
+import { VoiceConversation, type Step } from "@/components/VoiceConversation";
+import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/i18n";
+import { apiRequest, ApiRequestError, queryClient } from "@/lib/queryClient";
+
+export default function Signup() {
+  const { t, lang } = useI18n();
+  const [, navigate] = useLocation();
+  const [mode, setMode] = useState<"voice" | "form">("voice");
+
+  const steps = useMemo<Step[]>(() => [
+    { key: "shopName", prompt: t("askShopName"), label: t("shopName"), type: "text" },
+    { key: "email", prompt: t("askEmail"), label: t("email"), type: "email" },
+    { key: "loginMethod", prompt: t("askLoginMethod"), label: t("loginMethod"), type: "choice", choices: [
+      { value: "passphrase", label: t("loginPassphrase"), aliases: ["合言葉", "あいことば", "passphrase", "phrase"] },
+      { value: "password", label: t("loginPassword"), aliases: ["パスワード", "password"] },
+      { value: "both", label: t("loginBoth"), aliases: ["両方", "りょうほう", "both", "どちらも"] },
+    ] },
+    { key: "passphrase", prompt: t("askPassphrase"), label: t("passphrase"), type: "secret", when: (v) => v.loginMethod !== "password",
+      validate: (v) => v.replace(/[\s、。，．,.!?！？・ー\-_]/g, "").length >= 4 ? null : (lang === "ja" ? "合言葉は4文字以上にしてください" : "At least 4 characters, please.") },
+    { key: "passphrase2", prompt: t("askPassphraseAgain"), label: `${t("passphrase")} (2)`, type: "secret", when: (v) => v.loginMethod !== "password" },
+    { key: "password", prompt: t("askPassword"), label: t("password"), type: "secret", when: (v) => v.loginMethod !== "passphrase",
+      validate: (v) => v.length >= 8 ? null : (lang === "ja" ? "パスワードは8文字以上にしてください" : "At least 8 characters, please.") },
+  ], [t, lang]);
+
+  async function complete(v: Record<string, string>) {
+    const norm = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60)).replace(/[\s、。，．,.!?！？・ー\-_]/g, "");
+    if (v.loginMethod !== "password" && norm(v.passphrase) !== norm(v.passphrase2)) return t("passphraseMismatch");
+    try {
+      await apiRequest("POST", "/api/auth/signup", {
+        shopName: v.shopName, email: v.email, loginMethod: v.loginMethod, language: lang,
+        passphrase: v.loginMethod !== "password" ? v.passphrase : undefined,
+        password: v.loginMethod !== "passphrase" ? v.password : undefined,
+      });
+      await queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      navigate("/setup");
+    } catch (e) {
+      return e instanceof ApiRequestError ? e.message : t("error");
+    }
+  }
+
+  return (
+    <Layout title={t("signupTitle")}>
+      <VoiceConversation steps={steps} intro={t("signupSpeech")} mode={mode} onModeChange={setMode} onComplete={complete} submitLabel={t("ownerSignup")} />
+      <p className="mt-6"><Button variant="link" asChild><Link href="/login">{t("haveAccount")}</Link></Button></p>
+    </Layout>
+  );
+}

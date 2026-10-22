@@ -1,0 +1,458 @@
+/**
+ * ご予約ちゃんの会話の流れ（コードで安全を守る部分）。
+ *
+ * - 日常モデル（fast）が発話を受け、ツールを選ぶ
+ * - 書き込むツールは、確認文を読み上げて本人が「はい」と言うまで実行しない
+ * - ★ のツールは、さらに合言葉が合うまで実行しない。合言葉は AI に渡さず、履歴にも残さない
+ * - 「なぜ」「どうしたら」などの相談は、日常モデルが ask_advisor を呼び、相談モデル（smart、ツールなし）が答える
+ * - AI が知らないツール名を言ってきたら実行しない
+ * - 想定外のエラーでも会話を止めない（本人には短く、詳しくはログへ）
+ *
+ * HTTP 越しなので、確認待ちの状態（pending）をオーナーごとにメモリに持ち、
+ * /message → /confirm → /passphrase の順に進める。
+ */
+import type OpenAI from "openai";
+import type { Owner, Language } from "@shared/schema";
+import { errorMessage, normalizeLang } from "@shared/i18n";
+import { randomUUID } from "node:crypto";
+import { MODELS, client, speakable, stripThinking } from "./llm";
+import {
+  TOOL_SPECS, READ_TOOLS, WRITE_TOOLS, GUARDED_TOOLS, ADVISOR_TOOL, ToolContext, executeTool, describeAction, validateToolArgs, clockFor, type ToolResult,
+} from "./tools";
+import * as storage from "../storage";
+import { verifyPassphrase } from "../lib/passphrase";
+import { WEEKDAY_LABELS } from "@shared/i18n";
+import { WEEKDAY_KEYS } from "@shared/schema";
+
+export type ChatMsg = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+type ToolSpec = OpenAI.Chat.Completions.ChatCompletionTool;
+export type ToolCall = { id: string; name: string; arguments: string };
+
+export type ChatResult = { content: string | null; toolCalls: ToolCall[] };
+export type LockState = { unlockedUntil: number; failures: number; lockedUntil: number };
+
+/** 外部とつながる部分。テストでは偽物に差し替える */
+export type AgentDeps = {
+  chat(role: "fast" | "smart", messages: ChatMsg[], tools?: ToolSpec[]): Promise<ChatResult>;
+  exec(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<ToolResult>;
+  describe(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<string>;
+  /** 書き込みの引数の検査。問題があれば本人向けの理由、なければ null */
+  validate(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<string | null>;
+  verify(owner: Owner, phrase: string): boolean;
+  locks: { get(ownerId: number): Promise<LockState>; set(ownerId: number, s: LockState): Promise<void> };
+  history: { load(ownerId: number): Promise<{ role: "user" | "assistant"; content: string }[]>; save(ownerId: number, role: string, content: string, model?: string): Promise<void> };
+  now(): number;
+};
+
+export type AgentReply =
+  | { type: "reply"; text: string; model: "daily" | "consult"; changed: boolean; actions: Record<string, unknown>[] }
+  | { type: "confirm"; text: string; pendingId: string; action: string; guarded: boolean }
+  | { type: "passphrase"; text: string; pendingId: string; retry: boolean };
+
+type LoopState = { messages: ChatMsg[]; toolCalls: ToolCall[]; index: number; hops: number; changed: boolean; actions: Record<string, unknown>[] };
+
+type Pending = {
+  id: string; ownerId: number; createdAt: number; stage: "confirm" | "passphrase";
+  state: LoopState; call: ToolCall; name: string; args: Record<string, unknown>;
+};
+
+export const UNLOCK_MS = 10 * 60 * 1000;  // 一度合えば10分間は聞き直さない
+export const MAX_FAILURES = 3;             // 3回間違えたら
+export const LOCK_MS = 5 * 60 * 1000;      // 5分間お金の操作を止める
+const PENDING_TTL_MS = 5 * 60 * 1000;      // 確認待ちは5分で消える
+const MAX_HOPS = 6;                        // ツール呼び出しの往復は最大6回
+const HISTORY_LIMIT = 20;
+
+const T = {
+  ja: {
+    fallback: "すみません、もう一度おっしゃっていただけますか。",
+    gaveUp: "すみません、うまく処理できませんでした。もう一度お願いします。",
+    noPending: "確認待ちの操作はありません。",
+    askPassphrase: "合言葉をお願いします。",
+    wrongRetry: "合言葉が違います。もう一度お願いします。",
+    declinedNote: "直前の操作は、ご本人が取り消したため実行していません。",
+    advisorPrefix: "",
+  },
+  en: {
+    fallback: "Sorry, could you say that again?",
+    gaveUp: "Sorry, I could not complete that. Please try again.",
+    noPending: "There is nothing waiting for confirmation.",
+    askPassphrase: "Please say your passphrase.",
+    wrongRetry: "That passphrase did not match. Please try again.",
+    declinedNote: "The previous action was declined and was not carried out.",
+    advisorPrefix: "",
+  },
+};
+
+const YES: Record<Language, string[]> = {
+  ja: ["はい", "うん", "そう", "ええ", "お願い", "おねがい", "いいです", "いいよ", "大丈夫", "だいじょうぶ", "オッケー", "ok", "yes", "正しい", "あってる", "合ってる", "そのとおり", "その通り", "実行して", "やって"],
+  en: ["yes", "yeah", "yep", "yup", "correct", "right", "ok", "okay", "sure", "that's right", "confirm", "go ahead", "do it"],
+};
+const NO: Record<Language, string[]> = {
+  ja: ["いいえ", "いや", "違う", "ちがう", "だめ", "やり直し", "やりなおし", "ノー", "no", "間違い", "まちがい", "キャンセル", "やめ", "待って", "まって"],
+  en: ["no", "nope", "wrong", "incorrect", "again", "cancel", "not right", "redo", "nah", "wait", "stop"],
+};
+
+export function yesNo(text: string, lang: Language): "yes" | "no" | null {
+  const t = text.normalize("NFKC").toLowerCase().replace(/[\s、。，．,.!?！？]/g, "");
+  if (!t) return null;
+  if (NO[lang].some((w) => t.includes(w.replace(/\s/g, "")))) return "no";
+  if (YES[lang].some((w) => t.includes(w.replace(/\s/g, "")))) return "yes";
+  return null;
+}
+
+function parseArgs(raw: string): Record<string, unknown> {
+  try { const v = JSON.parse(raw || "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; }
+}
+
+export class Agent {
+  private pending = new Map<number, Pending>();
+  constructor(private deps: AgentDeps) {}
+
+  // ---------- 入口 ----------
+
+  /** 本人の発話を受ける */
+  async message(owner: Owner, text: string): Promise<AgentReply> {
+    const lang = normalizeLang(owner.language);
+    const ctx = new ToolContext(owner, lang);
+    const p = this.livePending(owner.id);
+    let note = "";
+    if (p) {
+      if (p.stage === "confirm") {
+        const yn = yesNo(text, lang);
+        if (yn) return this.confirm(owner, p.id, yn);
+      }
+      // 確認待ちのまま別の話をされた／合言葉待ちに普通の発話が来た → 取り消し扱い（発話は合言葉として扱わない）
+      this.pending.delete(owner.id);
+      note = T[lang].declinedNote;
+    }
+    const history = await this.deps.history.load(owner.id);
+    const messages: ChatMsg[] = [{ role: "system", content: await this.systemPrompt(ctx) }, ...history];
+    if (note) messages.push({ role: "system", content: note });
+    messages.push({ role: "user", content: text });
+    await this.deps.history.save(owner.id, "user", text);
+    return this.drive(ctx, { messages, toolCalls: [], index: 0, hops: 0, changed: false, actions: [] });
+  }
+
+  /** 確認文への「はい／いいえ」 */
+  async confirm(owner: Owner, pendingId: string, answer: "yes" | "no"): Promise<AgentReply> {
+    const lang = normalizeLang(owner.language);
+    const ctx = new ToolContext(owner, lang);
+    const p = this.livePending(owner.id);
+    if (!p || p.id !== pendingId || p.stage !== "confirm") return this.plain(owner, T[lang].noPending);
+    if (answer === "no") {
+      this.pending.delete(owner.id);
+      return this.resumeWith(ctx, p, { ok: false, error: errorMessage("owner_declined", lang) });
+    }
+    if (GUARDED_TOOLS.has(p.name)) {
+      const gate = await this.gate(owner);
+      if (gate === "ask") {
+        p.stage = "passphrase";
+        return { type: "passphrase", text: T[lang].askPassphrase, pendingId: p.id, retry: false };
+      }
+      if (gate !== "ok") {
+        this.pending.delete(owner.id);
+        return this.resumeWith(ctx, p, { ok: false, error: errorMessage(gate === "locked" ? "passphrase_locked" : "passphrase_missing", lang) });
+      }
+    }
+    this.pending.delete(owner.id);
+    return this.resumeWith(ctx, p, await this.run(ctx, p));
+  }
+
+  /** 合言葉（AI には渡さない。ここで直接照合する。呼び出し側もログに残さないこと） */
+  async passphrase(owner: Owner, pendingId: string, phrase: string): Promise<AgentReply> {
+    const lang = normalizeLang(owner.language);
+    const ctx = new ToolContext(owner, lang);
+    const p = this.livePending(owner.id);
+    if (!p || p.id !== pendingId || p.stage !== "passphrase") return this.plain(owner, T[lang].noPending);
+    const now = this.deps.now();
+    const lock = await this.deps.locks.get(owner.id);
+    if (lock.lockedUntil > now) {
+      this.pending.delete(owner.id);
+      return this.resumeWith(ctx, p, { ok: false, error: errorMessage("passphrase_locked", lang) });
+    }
+    if (this.deps.verify(owner, phrase)) {
+      await this.deps.locks.set(owner.id, { unlockedUntil: now + UNLOCK_MS, failures: 0, lockedUntil: 0 });
+      this.pending.delete(owner.id);
+      return this.resumeWith(ctx, p, await this.run(ctx, p));
+    }
+    const failures = lock.failures + 1;
+    if (failures >= MAX_FAILURES) {
+      await this.deps.locks.set(owner.id, { unlockedUntil: 0, failures: 0, lockedUntil: now + LOCK_MS });
+      this.pending.delete(owner.id);
+      return this.resumeWith(ctx, p, { ok: false, error: errorMessage("passphrase_rejected", lang) + " " + errorMessage("passphrase_locked", lang) });
+    }
+    await this.deps.locks.set(owner.id, { ...lock, failures });
+    return { type: "passphrase", text: T[lang].wrongRetry, pendingId: p.id, retry: true };
+  }
+
+  /** 確認待ちを捨てる（画面を閉じたときなど） */
+  cancelPending(ownerId: number) {
+    this.pending.delete(ownerId);
+  }
+
+  hasPending(ownerId: number): Pending["stage"] | null {
+    return this.livePending(ownerId)?.stage ?? null;
+  }
+
+  // ---------- 中身 ----------
+
+  private livePending(ownerId: number): Pending | undefined {
+    const p = this.pending.get(ownerId);
+    if (p && this.deps.now() - p.createdAt > PENDING_TTL_MS) { this.pending.delete(ownerId); return undefined; }
+    return p;
+  }
+
+  private async plain(owner: Owner, text: string): Promise<AgentReply> {
+    return { type: "reply", text, model: "daily", changed: false, actions: [] };
+  }
+
+  /** 合言葉の関門：ok（10分以内に合っている）/ ask（聞く）/ locked / missing */
+  private async gate(owner: Owner): Promise<"ok" | "ask" | "locked" | "missing"> {
+    const now = this.deps.now();
+    const lock = await this.deps.locks.get(owner.id);
+    if (lock.lockedUntil > now) return "locked";
+    if (lock.unlockedUntil > now) return "ok";
+    if (!owner.passphraseHash) return "missing";
+    return "ask";
+  }
+
+  /** 確認済みのツールを実行する */
+  private async run(ctx: ToolContext, p: Pending): Promise<ToolResult> {
+    const result = await this.deps.exec(ctx, p.name, p.args);
+    if (result.ok) p.state.changed = true;
+    return result;
+  }
+
+  /** ツールの結果を会話に戻して続きを進める */
+  private resumeWith(ctx: ToolContext, p: Pending, result: ToolResult): Promise<AgentReply> {
+    const st = p.state;
+    if (result.action) st.actions.push({ ...result });
+    st.messages.push({ role: "tool", tool_call_id: p.call.id, content: JSON.stringify(result) });
+    st.index += 1;
+    return this.drive(ctx, st);
+  }
+
+  /** ツール呼び出しと返答の往復。書き込みツールに当たったら確認のために止まる */
+  private async drive(ctx: ToolContext, st: LoopState): Promise<AgentReply> {
+    const lang = ctx.lang;
+    const ownerId = ctx.owner.id;
+    while (st.hops < MAX_HOPS) {
+      while (st.index < st.toolCalls.length) {
+        const call = st.toolCalls[st.index];
+        const name = call.name;
+        const args = parseArgs(call.arguments);
+        let result: ToolResult;
+        if (name === ADVISOR_TOOL) {
+          return this.consult(ctx, st, String(args.question ?? ""));
+        } else if (!READ_TOOLS.has(name) && !WRITE_TOOLS.has(name)) {
+          result = { ok: false, error: errorMessage("unknown_tool", lang, { name }) };
+        } else if (READ_TOOLS.has(name)) {
+          result = await this.deps.exec(ctx, name, args);
+        } else {
+          // 確認を聞く前に、引数が揃っているかをコードで確かめる（足りなければ AI に言い直させる）
+          let problem: string | null = null;
+          try { problem = await this.deps.validate(ctx, name, args); } catch (e) { console.error("[validate_error]", e); problem = errorMessage("server_error", lang); }
+          if (problem) {
+            st.messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: false, error: problem }) });
+            st.index += 1;
+            continue;
+          }
+          const text = await this.confirmText(ctx, name, args);
+          const p: Pending = { id: randomUUID(), ownerId, createdAt: this.deps.now(), stage: "confirm", state: st, call, name, args };
+          this.pending.set(ownerId, p);
+          await this.deps.history.save(ownerId, "assistant", text, MODELS.smart); // 確認文も履歴に残す（答えは confirm で受ける）
+          return { type: "confirm", text, pendingId: p.id, action: name, guarded: GUARDED_TOOLS.has(name) };
+        }
+        if (result.action) st.actions.push({ ...result });
+        st.messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+        st.index += 1;
+      }
+
+      let res: ChatResult;
+      try {
+        res = await this.deps.chat("fast", st.messages, TOOL_SPECS);
+      } catch (e) {
+        console.error("[llm_error:fast]", e);
+        return this.finish(ownerId, st, T[lang].gaveUp, "daily");
+      }
+      st.hops += 1;
+      if (!res.toolCalls.length) {
+        const text = speakable(res.content) || T[lang].fallback;
+        return this.finish(ownerId, st, text, "daily");
+      }
+      st.messages.push({
+        role: "assistant", content: stripThinking(res.content) || null,
+        tool_calls: res.toolCalls.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.arguments || "{}" } })),
+      });
+      st.toolCalls = res.toolCalls;
+      st.index = 0;
+    }
+    return this.finish(ownerId, st, T[lang].gaveUp, "daily");
+  }
+
+  private async finish(ownerId: number, st: LoopState, text: string, model: "daily" | "consult"): Promise<AgentReply> {
+    await this.deps.history.save(ownerId, "assistant", text, model === "daily" ? MODELS.fast : MODELS.smart);
+    return { type: "reply", text, model, changed: st.changed, actions: st.actions };
+  }
+
+  /** 相談モデル：ツールなし。今日の予約と今月の数字だけを添えて渡す */
+  private async consult(ctx: ToolContext, st: LoopState, question: string): Promise<AgentReply> {
+    const lang = ctx.lang;
+    const [today, sales] = await Promise.all([this.deps.exec(ctx, "get_today_reservations", {}), this.deps.exec(ctx, "get_sales_summary", {})]);
+    const history = st.messages.filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && !("tool_calls" in m)) as ChatMsg[];
+    const messages: ChatMsg[] = [
+      { role: "system", content: this.advisorPrompt(ctx) + "\n\n" + (lang === "ja" ? "参考の数字（JSON）: " : "Reference figures (JSON): ") + JSON.stringify({ today, thisMonth: sales }) },
+      ...history.slice(-HISTORY_LIMIT),
+    ];
+    if (question && !(history.at(-1)?.content === question)) messages.push({ role: "user", content: question });
+    try {
+      const res = await this.deps.chat("smart", messages);
+      const text = speakable(res.content) || T[lang].fallback;
+      return this.finish(ctx.owner.id, st, text, "consult");
+    } catch (e) {
+      console.error("[llm_error:smart]", e);
+      return this.finish(ctx.owner.id, st, T[lang].gaveUp, "consult");
+    }
+  }
+
+  /** 相談モデルに、本人へ読み上げる確認文を一文で作ってもらう。だめなら定型文 */
+  private async confirmText(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<string> {
+    const lang = ctx.lang;
+    let summary = name;
+    try { summary = await this.deps.describe(ctx, name, args); } catch (e) { console.error("[describe_error]", e); }
+    const fallback = lang === "ja" ? `${summary}、でよろしいでしょうか。` : `Shall I ${summary}?`;
+    try {
+      const res = await this.deps.chat("smart", [
+        { role: "system", content: lang === "ja"
+          ? "目の不自由なマッサージ師に読み上げる確認文を、日本語で一文だけ書いてください。「〜でよろしいでしょうか」で終えてください。日付・時刻・金額の数字はそのまま算用数字で書く（漢数字にしない）。予約番号や id のような記号は入れない。まだ実行していないので「承りました」とは言わない。説明や前置きは不要。文だけを返す。"
+          : "Write exactly one short sentence in English, to be read aloud to a blind massage therapist, asking them to confirm the action below. End with a question. Do not include booking numbers or codes. Do not say it is done. Return only the sentence." },
+        { role: "user", content: lang === "ja" ? "操作: 10月30日（金曜日）11時に、山田さん、30分コース（¥3,500）、当日払いで予約を入れる" : "Action: book Yamada for 30 min (¥3,500) on Friday, October 30 at 11:00, paying at the shop" },
+        { role: "assistant", content: lang === "ja" ? "10月30日金曜日の11時に、山田さんの30分コース、3,500円を当日払いでご予約でよろしいでしょうか。" : "Shall I book Yamada for the 30 minute course at 3,500 yen on Friday, October 30 at 11:00, paying at the shop?" },
+        { role: "user", content: (lang === "ja" ? "操作: " : "Action: ") + summary },
+      ]);
+      const text = speakable(res.content).split("\n")[0].trim();
+      // 疑問形で終わっていない（「記録しました」など完了形）なら使わない
+      const asksConfirmation = lang === "ja" ? /(でしょうか|ですか|ますか)[。？?]?$/.test(text) : /\?$/.test(text);
+      if (text && text.length < 300 && asksConfirmation) return text;
+    } catch (e) {
+      console.error("[llm_error:confirm]", e);
+    }
+    return fallback;
+  }
+
+  // ---------- 指示文 ----------
+
+  private async systemPrompt(ctx: ToolContext): Promise<string> {
+    const o = ctx.owner;
+    const lang = ctx.lang;
+    const c = clockFor(o);
+    const weekday = WEEKDAY_LABELS[lang][WEEKDAY_KEYS.indexOf(c.weekday)];
+    const shop = storage.shopName(o, lang) || (lang === "ja" ? "（店名は未登録）" : "(shop name not set)");
+    const menus = (await storage.listMenus(o.id, true)).map((m) => { const v = storage.menuView(m, lang); return `${v.name} ${v.minutes}${lang === "ja" ? "分" : " min"} ${v.price.display}`; }).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "まだありません" : "none yet");
+    if (lang === "ja") {
+      return `あなたは「ご予約ちゃん」です。目の不自由なマッサージ師の方の右腕として、予約と売り上げの管理を声で手伝います。
+お店: ${shop}
+現在は ${c.date} ${c.time}（${weekday}）、時間帯は ${o.timezone} です。今日は ${c.date}、明日は ${c.tomorrow}、今月は ${c.month.from} から ${c.month.to} までです。「明日」「来週の木曜」などはこの日付から計算してください。
+国は ${o.country}、通貨は ${o.currency}、話す言語は日本語です。
+メニュー: ${menus}
+
+守ること:
+- 返事はすべて読み上げられます。短く、丁寧に、日本語で。記号・表・箇条書き・絵文字・マークダウンは使わない。
+- 予約番号や id などの英数字は読み上げない。お客さんの名前と日時で話す。
+- 金額はツールの結果にある display の形で読み上げる。
+- 予約や金額は、必ずツールで調べてから答える。推測で答えない。覚えている内容ではなく、毎回ツールの結果で答える。
+- 予約を取り消す・変える・支払いを記録するときは、まず find_reservations_by_customer や get_today_reservations で予約の id を調べてからツールを呼ぶ。
+- ツールの結果が ok: true のときだけ「承りました」と言う。失敗したら error の理由をそのまま短く伝える。
+- 本人が取り消した操作は、実行されていないと伝える。
+- 合言葉は、あなたは聞かない・知らない・言わない。必要なときはシステムが直接確かめる。
+- カード番号などの支払い情報は、聞かない・言わない。
+- 返金はあなたは行わない。返金の対象かどうかを伝えるだけで、返金はオーナーが Stripe で行う。
+- 「お金を確認」「お金を数えて」「カメラ」と言われたら、履歴に以前の読み取りがあっても、必ず毎回 check_cash を呼んで新しく読み取る（まず get_today_reservations や find_reservations_by_customer で現地払い待ちの予約の id を調べる）。読み取りの結果はシステムが読み上げるので、あなたは check_cash の note を短く伝えるだけでよい。
+- check_cash の読み取りは参考です。手触りでも確かめていただくよう必ず添える。記録は record_onsite_payment で別に行う（履歴に読み取り結果があれば、その合計を amount に使う）。
+- 「なぜ」「どうしたら」「相談したい」、悩みや愚痴のときは ask_advisor を呼ぶ。
+- 履歴に確認待ちの質問が残っていても、本人が改めて頼まない限り、その操作を勝手に再開しない。
+- 性格はオーナーの右腕。愚痴や悩みにはまず共感する。踏み込みすぎない。`;
+    }
+    return `You are "GoYoyaku-chan", the right hand of a blind massage therapist. You manage their bookings and sales by voice.
+Shop: ${shop}
+It is now ${c.date} ${c.time} (${weekday}) in the ${o.timezone} time zone. Today is ${c.date}, tomorrow is ${c.tomorrow}, this month runs ${c.month.from} to ${c.month.to}. Compute "tomorrow", "next Thursday" and so on from these dates.
+Country ${o.country}, currency ${o.currency}, language English.
+Menus: ${menus}
+
+Rules:
+- Everything you say is read aloud. Be short and polite, in English. No symbols, tables, bullet points, emoji or markdown.
+- Never read out booking numbers or ids. Refer to bookings by the customer's name and the date and time.
+- Read amounts exactly as the "display" field in tool results.
+- Always look bookings and amounts up with tools before answering. Never guess or answer from memory.
+- Before cancelling, changing or recording payment for a booking, find its id with find_reservations_by_customer or get_today_reservations.
+- Say "done" or "noted" only when a tool result has ok: true. If it fails, briefly relay the error reason as given.
+- If the owner declines an action, tell them it was not carried out.
+- You never ask for, know or say the passphrase. The system checks it directly when needed.
+- Never ask for or say card numbers or other payment details.
+- You never issue refunds. Only say whether a cancellation is eligible; the owner refunds in Stripe.
+- When asked to check or count cash, or to open the camera, always call check_cash again even if an earlier reading is in the history (first find the id of the booking waiting for on-site payment with get_today_reservations or find_reservations_by_customer). The system reads the result aloud; you only relay the short note from check_cash.
+- check_cash readings are a reference only. Always remind the owner to confirm by touch. Recording is a separate step with record_onsite_payment (use the total from the reading in the history as the amount).
+- For "why", "how should I", requests for advice, worries or venting, call ask_advisor.
+- If the history contains an unanswered confirmation question, do not restart that action unless the owner asks again.
+- You are the owner's right hand. Empathize first with worries or complaints. Do not pry.`;
+  }
+
+  private advisorPrompt(ctx: ToolContext): string {
+    const o = ctx.owner;
+    const c = clockFor(o);
+    const shop = storage.shopName(o, ctx.lang);
+    if (ctx.lang === "ja") {
+      return `あなたは「ご予約ちゃん」の相談役です。目の不自由なマッサージ師（お店: ${shop || "未登録"}、通貨 ${o.currency}、今日は ${c.date}）の経営の相談や分析、悩みの聞き役を務めます。
+返事はすべて読み上げられます。記号・表・箇条書き・絵文字・マークダウンは使わず、話し言葉で、3〜6文ほどにまとめてください。
+まず共感し、それから具体的で小さな一歩を一つか二つ提案してください。数字は参考の数字から引用し、ないものは作らないでください。予約の操作やお金の記録はここでは行えません。踏み込みすぎず、押しつけないでください。`;
+    }
+    return `You are the advisor side of "GoYoyaku-chan". You help a blind massage therapist (shop: ${shop || "not set"}, currency ${o.currency}, today ${c.date}) with business questions, analysis and worries.
+Everything you say is read aloud. No symbols, tables, bullet points, emoji or markdown. Speak naturally in three to six sentences.
+Empathize first, then suggest one or two small concrete next steps. Quote only the reference figures; never invent numbers. You cannot change bookings or record money here. Do not pry or push.`;
+  }
+}
+
+// ---------- 本物の依存をつないだ既定の Agent ----------
+
+export const realDeps: AgentDeps = {
+  async chat(role, messages, tools) {
+    // 相談・確認文（smart）は推論を切って短く速く答えさせる。日常（fast）は推論を残し、途中で切れないよう余裕を持たせる
+    const res = await client().chat.completions.create({
+      model: role === "fast" ? MODELS.fast : MODELS.smart,
+      messages, ...(tools ? { tools } : {}), temperature: 0.2, max_tokens: role === "fast" ? 1500 : 1000,
+      ...(role === "smart" ? { chat_template_kwargs: { enable_thinking: false } } : {}),
+    } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
+    const m = res.choices[0]?.message;
+    if (!m?.content && !m?.tool_calls?.length) console.warn(`[llm_empty:${role}] finish_reason=${res.choices[0]?.finish_reason}`);
+    return {
+      content: m?.content ?? null,
+      toolCalls: (m?.tool_calls ?? []).filter((c): c is OpenAI.Chat.Completions.ChatCompletionMessageToolCall & { type: "function" } => c.type === "function")
+        .map((c) => ({ id: c.id, name: c.function.name, arguments: c.function.arguments })),
+    };
+  },
+  exec: executeTool,
+  describe: describeAction,
+  validate: validateToolArgs,
+  verify: (owner, phrase) => verifyPassphrase(phrase, owner.passphraseHash),
+  locks: {
+    async get(ownerId) {
+      const v = await storage.getVoiceSession(ownerId);
+      return { unlockedUntil: v.unlockedUntil?.getTime() ?? 0, failures: v.failures, lockedUntil: v.lockedUntil?.getTime() ?? 0 };
+    },
+    async set(ownerId, s) {
+      await storage.getVoiceSession(ownerId);
+      await storage.updateVoiceSession(ownerId, { unlockedUntil: s.unlockedUntil ? new Date(s.unlockedUntil) : null, failures: s.failures, lockedUntil: s.lockedUntil ? new Date(s.lockedUntil) : null });
+    },
+  },
+  history: {
+    async load(ownerId) {
+      const rows = await storage.listChatMessages(ownerId, HISTORY_LIMIT);
+      return rows.filter((r) => r.role === "user" || r.role === "assistant").map((r) => ({ role: r.role as "user" | "assistant", content: r.content.slice(0, 2000) }));
+    },
+    async save(ownerId, role, content, model) { await storage.addChatMessage(ownerId, role, content, model); },
+  },
+  now: () => Date.now(),
+};
+
+export const agent = new Agent(realDeps);

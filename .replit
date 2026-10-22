@@ -1,6 +1,13 @@
-modules = ["python-3.12"]
-entrypoint = "main.py"
-run = "python3 main.py"
+modules = ["nodejs-20", "web"]
+run = "npm run dev"
 
 [nix]
 channel = "stable-24_05"
+
+[deployment]
+build = ["npm", "run", "build"]
+run = ["npm", "run", "start"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
