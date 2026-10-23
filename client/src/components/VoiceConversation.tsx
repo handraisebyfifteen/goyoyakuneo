@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n, type Lang } from "@/lib/i18n";
-import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, parseSpokenEmail, parseSpokenPhone, parseSpokenNumber, parseSpokenTime, getVoicePrefs, SpeechNotAllowed } from "@/lib/speech";
+import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, parseSpokenEmail, parseSpokenPhone, parseSpokenNumber, parseSpokenTime, getVoicePrefs, takeSpeakError, SpeechNotAllowed } from "@/lib/speech";
 
 export type Choice = { value: string; label: string; aliases?: string[] };
 export type Step = {
@@ -72,6 +72,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
   const [needsGesture, setNeedsGesture] = useState(false);
   const [waitingTyped, setWaitingTyped] = useState(false);
   const [micBlocked, setMicBlocked] = useState(false);
+  const [speakError, setSpeakError] = useState("");
   const valuesRef = useRef<Values>({});
   const typedRef = useRef<string | null>(null);
   const waitTyped = useRef<((v: string) => void) | null>(null);
@@ -86,7 +87,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
   const say = useCallback(async (text: string) => {
     setShown(text);
     if (!ttsSupported()) return;
-    try { await speak(text, speechLang, { pitch }); setNeedsGesture(false); }
+    try { await speak(text, speechLang, { pitch }); setNeedsGesture(false); setSpeakError(takeSpeakError() ?? ""); }
     catch (e) { if (e instanceof SpeechNotAllowed) setNeedsGesture(true); }
   }, [speechLang, pitch]);
 
@@ -289,13 +290,14 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, lang]);
 
+  // 音を出す許可がまだなら、ページ内のどんな操作でも（ボタン、キー、タップ）最初からやり直す
+  const startVoice = useCallback(() => { setNeedsGesture(false); valuesRef.current = {}; runFrom(0); }, [runFrom]);
   useEffect(() => {
     if (!needsGesture) return;
-    const retry = () => { setNeedsGesture(false); valuesRef.current = {}; runFrom(0); };
-    window.addEventListener("keydown", retry, { once: true });
-    window.addEventListener("pointerdown", retry, { once: true });
-    return () => { window.removeEventListener("keydown", retry); window.removeEventListener("pointerdown", retry); };
-  }, [needsGesture, runFrom]);
+    window.addEventListener("keydown", startVoice, { once: true });
+    window.addEventListener("pointerdown", startVoice, { once: true });
+    return () => { window.removeEventListener("keydown", startVoice); window.removeEventListener("pointerdown", startVoice); };
+  }, [needsGesture, startVoice]);
 
   function submitTyped(value: string) {
     if (waitTyped.current) { const r = waitTyped.current; waitTyped.current = null; r(value); return; }
@@ -333,7 +335,13 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
           <p className="text-xl font-semibold" data-testid="text-prompt">{shown}</p>
           {error && <p className="mt-2 text-destructive font-semibold" role="alert">{error}</p>}
         </div>
-        {needsGesture && <p className="mt-2 text-sm" role="status">{t("pressAnyKey")}</p>}
+        {needsGesture && (
+          <div className="mt-3" role="status">
+            <Button size="lg" onClick={startVoice} data-testid="button-start-voice">{t("startVoice")}</Button>
+            <p className="mt-1 text-sm text-muted-foreground">{t("pressAnyKey")}</p>
+          </div>
+        )}
+        {speakError && <p className="mt-2 text-sm text-destructive" role="status">{t("speakFailed", { reason: speakError })}</p>}
         {!sttSupported() && <p className="mt-2 text-sm text-muted-foreground">{t("noSpeech")}</p>}
         {micBlocked && <p className="mt-2 text-sm text-muted-foreground">{t("micBlocked")}</p>}
       </div>

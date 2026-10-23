@@ -118,16 +118,32 @@ const RATE: Record<Rate, number> = { slow: 0.85, normal: 1, fast: 1.2 };
 
 export type SpeakOptions = { pitch?: number; rate?: number };
 
+// Chrome は読み上げ中の文を手放すと途中で黙ることがあるので、参照を持っておく
+let currentUtterance: SpeechSynthesisUtterance | null = null;
+let lastError: string | null = null;
+/** 直前の読み上げが失敗していれば、その理由（取り出すと消える） */
+export function takeSpeakError(): string | null { const e = lastError; lastError = null; return e; }
+
+/** ブラウザが音を出してよい状態か（ページ内を一度でも操作したか）。わからないブラウザでは true */
+export function userActivated(): boolean {
+  const ua = (navigator as unknown as { userActivation?: { hasBeenActive: boolean } }).userActivation;
+  return ua ? ua.hasBeenActive : true;
+}
+
 /** 読み上げる。終わったら resolve。ブラウザの自動再生制限なら SpeechNotAllowed で reject。
  *  「アプリの読み上げを止める」設定のときは何もしない（スクリーンリーダーに任せる） */
 export async function speak(text: string, lang: string, opts: SpeakOptions = {}): Promise<void> {
   if (!ttsSupported() || !text) return;
   const prefs = getVoicePrefs();
   if (prefs.mute) return;
-  speechSynthesis.cancel();
+  if (!userActivated()) throw new SpeechNotAllowed("not-allowed");
+  // 止めた直後に話すと Chrome が黙って落とすことがあるので、少し待つ
+  if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); await new Promise((r) => setTimeout(r, 80)); }
+  if (speechSynthesis.paused) speechSynthesis.resume();
   const voices = await loadVoices();
   return new Promise((resolve, reject) => {
     const u = new SpeechSynthesisUtterance(text);
+    currentUtterance = u;
     const key = voiceLangOf(lang);
     const v = pickVoice(voices, lang);
     // 声が見つかればその声の言語に合わせる（ja-JP の文を en-GB の声で読まない）
@@ -138,17 +154,19 @@ export async function speak(text: string, lang: string, opts: SpeakOptions = {})
     u.pitch = key === "en" ? 1 + (pitch - 1) / 2 : pitch;
     u.rate = opts.rate ?? RATE[prefs[key].rate] * (key === "en" ? 0.95 : 1);
     let settled = false;
-    u.onend = () => { if (!settled) { settled = true; resolve(); } };
+    const done = () => { if (!settled) { settled = true; if (currentUtterance === u) currentUtterance = null; resolve(); } };
+    u.onend = done;
     u.onerror = (e) => {
       if (settled) return;
       settled = true;
+      if (currentUtterance === u) currentUtterance = null;
       if (e.error === "not-allowed") reject(new SpeechNotAllowed("not-allowed"));
       else if (e.error === "interrupted" || e.error === "canceled") resolve();
-      else resolve();
+      else { lastError = e.error; resolve(); }
     };
     speechSynthesis.speak(u);
     // 一部のブラウザは onend を落とすので、長さに応じた保険
-    setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 2000 + text.length * 180);
+    setTimeout(done, 2000 + text.length * 180);
   });
 }
 
