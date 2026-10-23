@@ -1,14 +1,20 @@
-import { Link } from "wouter";
+import { useEffect } from "react";
+import { Link, useLocation } from "wouter";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
 import { useAnnounce } from "@/hooks/useAnnounce";
 import { useAuth } from "@/hooks/useAuth";
+import { hasVoicePrefs } from "@/lib/speech";
 
 export default function Welcome() {
   const { t, speechLang } = useI18n();
   const { owner } = useAuth();
-  const needsGesture = useAnnounce(t("welcomeSpeech"), speechLang);
+  const [, navigate] = useLocation();
+  // 初めて開いた人は、まず声の設定へ（声で進められる）
+  const firstRun = !hasVoicePrefs();
+  useEffect(() => { if (firstRun) navigate("/voice?first=1", { replace: true }); }, [firstRun, navigate]);
+  const needsGesture = useAnnounce(t("welcomeSpeech"), speechLang, !firstRun);
   return (
     <Layout>
       <div className="text-center space-y-8 py-8">

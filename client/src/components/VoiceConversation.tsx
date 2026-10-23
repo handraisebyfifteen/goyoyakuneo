@@ -29,7 +29,12 @@ export type Step = {
   defaultValue?: string;
   validate?: (value: string) => string | null;
   when?: (values: Record<string, string>) => boolean;
+  /** 質問の前に鳴らすもの（声の見本など） */
+  before?: () => Promise<void>;
 };
+
+/** 最初の案内。別の言語で一言添えたいとき（"For English, say English." など）は配列で渡す */
+export type IntroPart = { text: string; lang?: string };
 
 export type Values = Record<string, string>;
 type Mode = "voice" | "form";
@@ -38,7 +43,7 @@ type Answer = { text: string; fromVoice: boolean };
 
 type Props = {
   steps: Step[];
-  intro?: string;
+  intro?: string | IntroPart[];
   mode: Mode;
   onModeChange: (m: Mode) => void;
   onComplete: (values: Values) => Promise<string | void>;
@@ -84,6 +89,24 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
     try { await speak(text, speechLang, { pitch }); setNeedsGesture(false); }
     catch (e) { if (e instanceof SpeechNotAllowed) setNeedsGesture(true); }
   }, [speechLang, pitch]);
+
+  const sayIntro = useCallback(async (parts: string | IntroPart[]) => {
+    if (typeof parts === "string") return say(parts);
+    setShown(parts.map((p) => p.text).join(" "));
+    if (!ttsSupported()) return;
+    for (const p of parts) {
+      try { await speak(p.text, p.lang ?? speechLang, { pitch }); setNeedsGesture(false); }
+      catch (e) { if (e instanceof SpeechNotAllowed) { setNeedsGesture(true); return; } }
+    }
+  }, [say, speechLang, pitch]);
+
+  // 質問の前の見本（声の聞き比べなど）。読み上げがまだ許可されていなければ、質問と同じく「キーを押して」の案内にする
+  const runBefore = useCallback(async (step: Step) => {
+    if (!step.before) return;
+    setShown(step.prompt);
+    try { await step.before(); setNeedsGesture(false); }
+    catch (e) { if (e instanceof SpeechNotAllowed) setNeedsGesture(true); }
+  }, []);
 
   const activeSteps = useCallback(() => steps.filter((s) => !s.when || s.when(valuesRef.current)), [steps]);
 
@@ -211,6 +234,8 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
       let prompt = step.prompt;
       if (step.type === "choice") prompt += " " + t("choose", { options: (step.choices ?? []).map((x) => x.label).join(lang === "ja" ? "、" : ", ") });
       if (step.defaultValue !== undefined && step.type !== "secret") prompt += lang === "ja" ? ` 今は「${step.defaultValue}」です。そのままなら「そのまま」と言ってください。` : ` Currently "${step.defaultValue}". Say "keep" to leave it.`;
+      await runBefore(step);
+      if (!alive()) return;
       await say(prompt);
       if (!alive()) return;
 
@@ -247,19 +272,19 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
         if (!alive()) return;
         setConfirming(false);
         if (answer === "yes") { valuesRef.current[step.key] = parsed.value; committed = true; }
-        else { setError(""); setStatus("speaking"); await say(step.prompt); }
+        else { setError(""); setStatus("speaking"); await runBefore(step); if (!alive()) return; await say(step.prompt); }
       }
       i += 1;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSteps, finish, getAnswer, lang, say, setLang, t]);
+  }, [activeSteps, finish, getAnswer, lang, runBefore, say, setLang, t]);
 
   // 会話の開始。言語が変わったら最初からやり直す（送信中・完了後は何もしない）
   useEffect(() => {
     if (mode !== "voice") { runId.current++; stopSpeaking(); stopListening(); setStatus("idle"); setConfirming(false); return; }
     if (statusRef.current === "submitting" || statusRef.current === "done") return;
     valuesRef.current = {};
-    (async () => { if (intro) await say(intro); runFrom(0); })();
+    (async () => { if (intro) await sayIntro(intro); runFrom(0); })();
     return () => { runId.current++; stopSpeaking(); stopListening(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, lang]);

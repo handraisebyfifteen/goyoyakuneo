@@ -56,6 +56,11 @@ export function getVoicePrefs(): VoicePrefs {
   return prefsCache;
 }
 
+/** 声の設定を一度でも保存したか（初めて開いた人には、まず声の設定を案内する） */
+export function hasVoicePrefs(): boolean {
+  try { return localStorage.getItem(PREFS_KEY) !== null; } catch { return true; }
+}
+
 export function setVoicePrefs(next: VoicePrefs) {
   prefsCache = next;
   try { localStorage.setItem(PREFS_KEY, JSON.stringify(next)); } catch { /* 無視 */ }
@@ -147,12 +152,14 @@ export async function speak(text: string, lang: string, opts: SpeakOptions = {})
   });
 }
 
-/** 設定画面の試し聞き。設定で止めていても鳴らす */
-export async function previewVoice(lang: VoiceLang, pref: VoicePref): Promise<void> {
+const SAMPLE: Record<VoiceLang, string> = { ja: "こんにちは、ご予約ちゃんです。ご予約を承ります。", en: "Hello, this is GoYoyaku-chan. I can take your booking." };
+
+/** 設定画面の試し聞き。保存前の設定で鳴らす。「読み上げを止める」設定でも鳴らす（声を選ぶためなので） */
+export async function previewVoice(lang: VoiceLang, pref: VoicePref, text: string = SAMPLE[lang]): Promise<void> {
   if (!ttsSupported()) return;
   const saved = getVoicePrefs();
   prefsCache = { ...saved, [lang]: pref, mute: false };
-  try { await speak(lang === "ja" ? "こんにちは、ご予約ちゃんです。ご予約を承ります。" : "Hello, this is GoYoyaku-chan. I can take your booking.", lang === "ja" ? "ja-JP" : "en-US"); }
+  try { await speak(text, lang === "ja" ? "ja-JP" : "en-US"); }
   finally { prefsCache = saved; }
 }
 

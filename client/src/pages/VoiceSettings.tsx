@@ -1,23 +1,29 @@
 /**
- * 声の設定。日本語と英語それぞれで女性/男性、必要なら具体的な声と速さを選ぶ。
+ * 声の設定。初めて開いた人はここから始まる（ようこそ画面より先）。
+ * 上：会話で設定する。女性/男性の声を実際に聞かせてから選んでもらい、次に速さを選ぶ。
+ * 下：詳しい設定。日本語・英語それぞれで具体的な声や速さを選ぶ、読み上げを止める。
  * 声は端末に入っているものなので、設定も端末（localStorage）に保存する。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation } from "wouter";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { VoiceConversation, type Step, type IntroPart } from "@/components/VoiceConversation";
 import { useI18n } from "@/lib/i18n";
-import { useAnnounce } from "@/hooks/useAnnounce";
-import { getVoicePrefs, setVoicePrefs, loadVoices, voicesFor, guessGender, previewVoice, ttsSupported, type VoiceLang, type VoicePref, type VoicePrefs, type Gender, type Rate } from "@/lib/speech";
+import { getVoicePrefs, setVoicePrefs, loadVoices, voicesFor, guessGender, previewVoice, speak, ttsSupported, type VoiceLang, type VoicePref, type VoicePrefs, type Gender, type Rate } from "@/lib/speech";
 
 const selectClass = "flex min-h-12 w-full rounded-md border-2 border-input bg-card px-3 py-2 text-base";
 
 export default function VoiceSettings() {
-  const { t, speechLang } = useI18n();
+  const { t, lang, speechLang } = useI18n();
+  const [, navigate] = useLocation();
+  const firstRun = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("first") === "1";
   const [prefs, setPrefs] = useState<VoicePrefs>(getVoicePrefs);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [savedMsg, setSavedMsg] = useState("");
-  const needsGesture = useAnnounce(t("voiceSettingsSpeech"), speechLang);
+  const [mode, setMode] = useState<"voice" | "form">("voice");
+  const current: VoiceLang = lang;
 
   useEffect(() => {
     let alive = true;
@@ -34,27 +40,74 @@ export default function VoiceSettings() {
     // 同じ文言でも毎回読まれるように、一度空にしてから入れる
     setTimeout(() => setSavedMsg(t("saved")), 50);
   }
-  const update = (lang: VoiceLang, patch: Partial<VoicePref>) => save({ ...prefs, [lang]: { ...prefs[lang], ...patch } });
+  const update = (l: VoiceLang, patch: Partial<VoicePref>) => save({ ...prefs, [l]: { ...prefs[l], ...patch } });
+
+  // ---------- 会話で設定する ----------
+  const intro = useMemo<IntroPart[]>(() => firstRun
+    ? [{ text: t("firstRunIntro") }, { text: t("firstRunOther"), lang: lang === "ja" ? "en-US" : "ja-JP" }]
+    : [{ text: t("voiceSetupIntro") }], [firstRun, lang, t]);
+
+  const steps = useMemo<Step[]>(() => {
+    const base = getVoicePrefs()[current];
+    const sample = async (gender: Gender, label: string) => {
+      await previewVoice(current, { ...base, gender, voice: null }, label);
+      await previewVoice(current, { ...base, gender, voice: null });
+    };
+    return [
+      { key: "gender", prompt: t("askGender"), label: t("voiceGender"), type: "choice",
+        before: async () => { await sample("female", t("sampleFemale")); await sample("male", t("sampleMale")); },
+        choices: [
+          { value: "female", label: t("female"), aliases: ["女性", "じょせい", "女", "おんな", "female", "woman", "lady", "最初", "さいしょ", "一つ目", "ひとつめ", "first"] },
+          { value: "male", label: t("male"), aliases: ["男性", "だんせい", "男", "おとこ", "male", "man", "二つ目", "ふたつめ", "次", "つぎ", "second"] },
+        ] },
+      { key: "rate", prompt: t("askRate"), label: t("rate"), type: "choice", choices: [
+        { value: "slow", label: t("rateSlow"), aliases: ["ゆっくり", "遅", "おそ", "slow"] },
+        { value: "normal", label: t("rateNormal"), aliases: ["ふつう", "普通", "そのまま", "normal", "same", "keep"] },
+        { value: "fast", label: t("rateFast"), aliases: ["はやい", "速", "早", "fast", "quick"] },
+      ] },
+    ];
+  }, [current, t]);
+
+  async function complete(v: Record<string, string>) {
+    const next: VoicePrefs = { ...getVoicePrefs(), [current]: { gender: v.gender as Gender, voice: null, rate: v.rate as Rate } };
+    save(next);
+    await speak(firstRun ? t("voiceSavedGo") : t("voiceSaved"), speechLang).catch(() => undefined);
+    if (firstRun) navigate("/", { replace: true });
+  }
+
+  function later() {
+    setVoicePrefs(getVoicePrefs());
+    navigate("/", { replace: true });
+  }
 
   return (
     <Layout title={t("voiceSettings")}>
       <div className="space-y-8">
-        {needsGesture && <p role="status">{t("pressAnyKey")}</p>}
         {!ttsSupported() && <p role="alert" className="text-destructive font-semibold">{t("ttsUnsupported")}</p>}
 
-        {(["ja", "en"] as VoiceLang[]).map((lang) => (
-          <LangSection key={lang} lang={lang} pref={prefs[lang]} voices={voices} onChange={(patch) => update(lang, patch)} />
-        ))}
+        <section aria-labelledby="voice-by-voice" className="space-y-4">
+          <h2 id="voice-by-voice" className="text-xl font-bold">{t("byVoice")}</h2>
+          <VoiceConversation steps={steps} intro={intro} mode={mode} onModeChange={setMode} onComplete={complete} submitLabel={t("save")} />
+          {firstRun && <p><Button variant="link" onClick={later} data-testid="button-later">{t("later")}</Button></p>}
+          {!firstRun && <p><Button variant="link" asChild><Link href="/">{t("back")}</Link></Button></p>}
+        </section>
 
-        <section aria-labelledby="mute-heading" className="rounded-xl border-2 bg-card p-5 space-y-3">
-          <h2 id="mute-heading" className="text-xl font-bold">{t("srHeading")}</h2>
-          <div className="flex items-start gap-3">
-            <input id="mute" type="checkbox" className="mt-1 h-6 w-6" checked={prefs.mute} aria-describedby="mute-note" onChange={(e) => save({ ...prefs, mute: e.target.checked })} data-testid="checkbox-mute" />
-            <div>
-              <Label htmlFor="mute" className="text-base">{t("muteApp")}</Label>
-              <p id="mute-note" className="text-sm text-muted-foreground mt-1">{t("muteNote")}</p>
+        <section aria-labelledby="voice-detail" className="space-y-6">
+          <h2 id="voice-detail" className="text-xl font-bold">{t("detailedSettings")}</h2>
+          {(["ja", "en"] as VoiceLang[]).map((l) => (
+            <LangSection key={l} lang={l} pref={prefs[l]} voices={voices} onChange={(patch) => update(l, patch)} />
+          ))}
+
+          <section aria-labelledby="mute-heading" className="rounded-xl border-2 bg-card p-5 space-y-3">
+            <h3 id="mute-heading" className="text-lg font-bold">{t("srHeading")}</h3>
+            <div className="flex items-start gap-3">
+              <input id="mute" type="checkbox" className="mt-1 h-6 w-6" checked={prefs.mute} aria-describedby="mute-note" onChange={(e) => save({ ...prefs, mute: e.target.checked })} data-testid="checkbox-mute" />
+              <div>
+                <Label htmlFor="mute" className="text-base">{t("muteApp")}</Label>
+                <p id="mute-note" className="text-sm text-muted-foreground mt-1">{t("muteNote")}</p>
+              </div>
             </div>
-          </div>
+          </section>
         </section>
 
         <p role="status" aria-live="polite" className="text-sm text-muted-foreground min-h-5">{savedMsg}</p>
@@ -77,7 +130,7 @@ function LangSection({ lang, pref, voices, onChange }: { lang: VoiceLang; pref: 
 
   return (
     <section aria-labelledby={`voice-${lang}`} className="rounded-xl border-2 bg-card p-5 space-y-4">
-      <h2 id={`voice-${lang}`} className="text-xl font-bold">{title}</h2>
+      <h3 id={`voice-${lang}`} className="text-lg font-bold">{title}</h3>
 
       <fieldset>
         <legend className="font-semibold mb-2">{t("voiceGender")}</legend>
