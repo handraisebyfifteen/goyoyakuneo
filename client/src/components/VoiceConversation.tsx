@@ -2,13 +2,21 @@
  * 台本つきの会話で入力を集める部品（AI は使わない）。
  * 読み上げ → 聞き取り → 「〜ですね。よろしいですか？」→ はい/いいえ、の一本道。
  * 同じ台本を「フォーム」としても表示でき、キーボードだけでも最後まで進める。
+ *
+ * 目が見えない人への配慮：
+ * - 各ステップで、答えるための部品（入力欄・はい/いいえ・選択肢）にフォーカスを移す
+ * - マイクが使えないときや二度聞き取れなかったときは、声で待ち続けず入力欄に切り替える
+ * - 「はい/いいえ」のボタンは聞き取り中も消さない
+ * - 状態表示（聞いています…）はスクリーンリーダーに逐一読ませない。読ませるのは質問と結果だけ
+ * - 「アプリの読み上げを止める」設定なら自動では聞き取らず、「話す」ボタンか入力欄で進める
+ * - いつでも「English」「日本語」と言えば言語が切り替わる
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useI18n } from "@/lib/i18n";
-import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, parseSpokenEmail, parseSpokenPhone, parseSpokenNumber, parseSpokenTime, SpeechNotAllowed } from "@/lib/speech";
+import { useI18n, type Lang } from "@/lib/i18n";
+import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, parseSpokenEmail, parseSpokenPhone, parseSpokenNumber, parseSpokenTime, getVoicePrefs, SpeechNotAllowed } from "@/lib/speech";
 
 export type Choice = { value: string; label: string; aliases?: string[] };
 export type Step = {
@@ -25,7 +33,8 @@ export type Step = {
 
 export type Values = Record<string, string>;
 type Mode = "voice" | "form";
-type Status = "idle" | "speaking" | "listening" | "confirming" | "submitting" | "done";
+type Status = "idle" | "speaking" | "listening" | "submitting" | "done";
+type Answer = { text: string; fromVoice: boolean };
 
 type Props = {
   steps: Step[];
@@ -39,20 +48,35 @@ type Props = {
 
 const NONE_WORDS = ["なし", "ない", "ありません", "none", "no", "nothing", "skip"];
 const KEEP_WORDS = ["そのまま", "変えない", "かえない", "keep", "same", "default", "skip"];
+const LANG_WORDS: Record<Lang, string[]> = { ja: ["日本語", "にほんご", "japanese"], en: ["english", "英語", "えいご", "イングリッシュ"] };
+// マイクそのものが使えないときの音声認識のエラー。これが出たら以後は声で聞かない
+const MIC_ERRORS = ["not-allowed", "audio-capture", "service-not-allowed"];
+// 「話す」ボタンが押されたことを入力待ちに伝える印
+const TALK_AGAIN = "\u0000talk";
+
+const normalize = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[\s、。，．,.!?！？]/g, "");
 
 export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete, pitch = 1, submitLabel }: Props) {
-  const { t, lang, speechLang } = useI18n();
+  const { t, lang, setLang, speechLang } = useI18n();
   const [index, setIndex] = useState(0);
   const [status, setStatus] = useState<Status>("idle");
+  const [confirming, setConfirming] = useState(false);
   const [shown, setShown] = useState("");
   const [typed, setTyped] = useState("");
   const [error, setError] = useState("");
   const [needsGesture, setNeedsGesture] = useState(false);
+  const [waitingTyped, setWaitingTyped] = useState(false);
+  const [micBlocked, setMicBlocked] = useState(false);
   const valuesRef = useRef<Values>({});
   const typedRef = useRef<string | null>(null);
+  const waitTyped = useRef<((v: string) => void) | null>(null);
+  const micBlockedRef = useRef(false);
+  const statusRef = useRef<Status>("idle");
   const runId = useRef(0);
-  const liveRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const yesRef = useRef<HTMLButtonElement>(null);
+  const groupRef = useRef<HTMLDivElement>(null);
+  statusRef.current = status;
 
   const say = useCallback(async (text: string) => {
     setShown(text);
@@ -63,9 +87,57 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
 
   const activeSteps = useCallback(() => steps.filter((s) => !s.when || s.when(valuesRef.current)), [steps]);
 
+  // 声で自動的に聞いてよいか：音声認識があり、マイクが拒否されておらず、読み上げを止める設定でもない
+  const canAutoListen = () => sttSupported() && !micBlockedRef.current && !getVoicePrefs().mute;
+
+  function waitForTyped(): Promise<string> {
+    setStatus("idle");
+    setWaitingTyped(true);
+    return new Promise<string>((resolve) => { waitTyped.current = resolve; }).finally(() => setWaitingTyped(false));
+  }
+
+  /** 一回分の答えを受け取る。声で聞けなければ入力欄で待つ。流れが止められたら null */
+  const getAnswer = useCallback(async (alive: () => boolean): Promise<Answer | null> => {
+    let misses = 0;
+    let talkOnce = false;
+    while (alive()) {
+      if (typedRef.current !== null) { const v = typedRef.current; typedRef.current = null; return { text: v, fromVoice: false }; }
+      if (talkOnce || canAutoListen()) {
+        talkOnce = false;
+        setStatus("listening");
+        try { return { text: await listen(speechLang), fromVoice: true }; }
+        catch (e) {
+          if (!alive()) return null;
+          if (typedRef.current !== null) continue;
+          const code = e instanceof Error ? e.message : "";
+          if (MIC_ERRORS.includes(code)) {
+            micBlockedRef.current = true; setMicBlocked(true);
+            await say(t("micBlocked"));
+          } else {
+            misses += 1;
+            if (misses < 2) { await say(t("notHeard")); continue; }
+            await say(t("typeOrTalk"));
+          }
+          if (!alive()) return null;
+        }
+      }
+      const v = await waitForTyped();
+      if (!alive()) return null;
+      if (v === TALK_AGAIN) { misses = 0; talkOnce = true; continue; }
+      return { text: v, fromVoice: false };
+    }
+    return null;
+  }, [say, speechLang, t]);
+
+  function languageSwitch(text: string): Lang | null {
+    const low = normalize(text);
+    for (const l of Object.keys(LANG_WORDS) as Lang[]) if (l !== lang && LANG_WORDS[l].some((w) => normalize(w) === low)) return l;
+    return null;
+  }
+
   function parseAnswer(step: Step, raw: string, fromVoice: boolean): { value: string; display: string } | { error: string } {
     const text = raw.trim();
-    const low = text.normalize("NFKC").toLowerCase().replace(/[\s、。，．,.!?！？]/g, "");
+    const low = normalize(text);
     if (step.defaultValue !== undefined && KEEP_WORDS.includes(low)) return { value: step.defaultValue, display: step.defaultValue };
     if (step.optional && (low === "" || NONE_WORDS.includes(low))) return { value: "", display: t("none") };
     switch (step.type) {
@@ -134,7 +206,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
         return;
       }
       const step = list[i];
-      setIndex(i); setError(""); setTyped(""); typedRef.current = null;
+      setIndex(i); setError(""); setTyped(""); setConfirming(false); typedRef.current = null;
       setStatus("speaking");
       let prompt = step.prompt;
       if (step.type === "choice") prompt += " " + t("choose", { options: (step.choices ?? []).map((x) => x.label).join(lang === "ja" ? "、" : ", ") });
@@ -144,56 +216,53 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
 
       let committed = false;
       while (alive() && !committed) {
-        let heard = "";
-        let fromVoice = true;
-        if (typedRef.current !== null) { heard = typedRef.current; typedRef.current = null; fromVoice = false; }
-        else if (sttSupported()) {
-          setStatus("listening");
-          try { heard = await listen(speechLang); }
-          catch {
-            if (!alive()) return;
-            if (typedRef.current !== null) { heard = typedRef.current; typedRef.current = null; fromVoice = false; }
-            else { await say(t("notHeard")); continue; }
-          }
-        } else {
-          // 音声認識がない：入力欄からの送信を待つ
-          setStatus("idle");
-          heard = await new Promise<string>((resolve) => { waitTyped.current = resolve; });
-          fromVoice = false;
-        }
-        if (!alive()) return;
-        const parsed = parseAnswer(step, heard, fromVoice);
+        const ans = await getAnswer(alive);
+        if (!ans) return;
+        // 「English」「日本語」で言語を切り替える（言語を選ぶ質問のときは答えとして扱う）
+        const sw = step.type === "choice" ? null : languageSwitch(ans.text);
+        if (sw) { setLang(sw); return; }
+        const parsed = parseAnswer(step, ans.text, ans.fromVoice);
         if ("error" in parsed) { setError(parsed.error); await say(parsed.error); continue; }
         const v = step.validate?.(parsed.value);
         if (v) { setError(v); await say(v); continue; }
-        if (!fromVoice) { valuesRef.current[step.key] = parsed.value; committed = true; break; }
-        setStatus("confirming");
+        if (!ans.fromVoice) { valuesRef.current[step.key] = parsed.value; committed = true; break; }
+
+        // 声で答えたときだけ、聞き間違いがないか確認する
+        setConfirming(true);
+        setStatus("speaking");
         await say(step.type === "secret" ? t("heardSecret") : t("heardYou", { value: parsed.display }));
         if (!alive()) return;
         let answer: "yes" | "no" | null = null;
-        if (typedRef.current !== null) { answer = typedRef.current === "yes" ? "yes" : "no"; typedRef.current = null; }
-        else {
-          setStatus("listening");
-          try { answer = yesNo(await listen(speechLang), lang); } catch { answer = null; }
-          if (typedRef.current !== null) { answer = typedRef.current === "yes" ? "yes" : typedRef.current === "no" ? "no" : answer; typedRef.current = null; }
+        let tries = 0;
+        while (alive() && answer === null) {
+          const a = await getAnswer(alive);
+          if (!a) return;
+          answer = a.text === "yes" || a.text === "no" ? a.text : yesNo(a.text, lang);
+          if (answer === null) {
+            tries += 1;
+            if (tries >= 2) { answer = "no"; break; }
+            await say(t("sayYesOrNo"));
+          }
         }
         if (!alive()) return;
+        setConfirming(false);
         if (answer === "yes") { valuesRef.current[step.key] = parsed.value; committed = true; }
-        else { await say(step.prompt); }
+        else { setError(""); setStatus("speaking"); await say(step.prompt); }
       }
       i += 1;
     }
-  }, [activeSteps, finish, lang, say, speechLang, t]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSteps, finish, getAnswer, lang, say, setLang, t]);
 
-  const waitTyped = useRef<((v: string) => void) | null>(null);
-
+  // 会話の開始。言語が変わったら最初からやり直す（送信中・完了後は何もしない）
   useEffect(() => {
-    if (mode !== "voice") { runId.current++; stopSpeaking(); stopListening(); setStatus("idle"); return; }
+    if (mode !== "voice") { runId.current++; stopSpeaking(); stopListening(); setStatus("idle"); setConfirming(false); return; }
+    if (statusRef.current === "submitting" || statusRef.current === "done") return;
     valuesRef.current = {};
     (async () => { if (intro) await say(intro); runFrom(0); })();
     return () => { runId.current++; stopSpeaking(); stopListening(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode]);
+  }, [mode, lang]);
 
   useEffect(() => {
     if (!needsGesture) return;
@@ -212,40 +281,53 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
 
   const list = activeSteps();
   const step = list[Math.min(index, Math.max(list.length - 1, 0))];
+  const busy = status === "submitting" || status === "done";
+  const buttonsStep = step?.type === "choice" || step?.type === "yesno";
+
+  // ステップが変わるたびに、答えるための部品へフォーカスを移す
+  useEffect(() => {
+    if (mode !== "voice" || busy) return;
+    const el = confirming ? yesRef.current : buttonsStep ? groupRef.current : inputRef.current;
+    el?.focus({ preventScroll: false });
+  }, [mode, busy, confirming, buttonsStep, index, waitingTyped]);
 
   // ---------- フォーム表示 ----------
   if (mode === "form") {
     return <FormMode steps={steps} onSubmit={async (values) => { valuesRef.current = values; return finish(); }} onSwitch={() => onModeChange("voice")} submitLabel={submitLabel} />;
   }
 
-  const busy = status === "submitting" || status === "done";
+  const statusLabel = status === "listening" ? t("listening") : status === "speaking" ? t("speaking") : status === "submitting" ? t("processing") : "";
+  const showTalk = waitingTyped && sttSupported() && !micBlocked;
+
   return (
     <div className="space-y-5">
-      <div className="rounded-lg border-2 bg-card p-5 min-h-28" aria-live="polite" ref={liveRef}>
-        <p className="text-sm text-muted-foreground mb-1">
-          {status === "listening" ? t("listening") : status === "speaking" ? t("speaking") : status === "submitting" ? t("processing") : ""}
-        </p>
-        <p className="text-xl font-semibold" data-testid="text-prompt">{shown}</p>
-        {error && <p className="mt-2 text-destructive font-semibold" role="alert">{error}</p>}
+      <div className="rounded-lg border-2 bg-card p-5 min-h-28">
+        {/* 状態はスクリーンリーダーに読ませない（質問と重なってうるさいため）。質問と結果だけ読ませる */}
+        <p className="text-sm text-muted-foreground mb-1" aria-hidden="true">{statusLabel}</p>
+        <div aria-live="polite" aria-atomic="true">
+          <p className="text-xl font-semibold" data-testid="text-prompt">{shown}</p>
+          {error && <p className="mt-2 text-destructive font-semibold" role="alert">{error}</p>}
+        </div>
         {needsGesture && <p className="mt-2 text-sm" role="status">{t("pressAnyKey")}</p>}
         {!sttSupported() && <p className="mt-2 text-sm text-muted-foreground">{t("noSpeech")}</p>}
+        {micBlocked && <p className="mt-2 text-sm text-muted-foreground">{t("micBlocked")}</p>}
       </div>
 
       {step && !busy && (
         <div className="space-y-3">
-          {status === "confirming" ? (
-            <div className="flex gap-3">
-              <Button size="lg" onClick={() => submitTyped("yes")} data-testid="button-yes">{t("yes")}</Button>
+          {confirming ? (
+            <div className="flex gap-3" role="group" aria-label={t("waitingYesNo")}>
+              <Button ref={yesRef} size="lg" onClick={() => submitTyped("yes")} data-testid="button-yes">{t("yes")}</Button>
               <Button size="lg" variant="outline" onClick={() => submitTyped("no")} data-testid="button-no">{t("no")}</Button>
             </div>
           ) : step.type === "choice" ? (
-            <div className="flex flex-wrap gap-3" role="group" aria-label={step.label ?? step.prompt}>
+            <div ref={groupRef} tabIndex={-1} className="flex flex-wrap gap-3 outline-none" role="group" aria-label={step.label ?? step.prompt}>
               {(step.choices ?? []).map((c) => (
                 <Button key={c.value} size="lg" variant="outline" onClick={() => submitTyped(c.value)} data-testid={`button-choice-${c.value}`}>{c.label}</Button>
               ))}
             </div>
           ) : step.type === "yesno" ? (
-            <div className="flex gap-3">
+            <div ref={groupRef} tabIndex={-1} className="flex gap-3 outline-none" role="group" aria-label={step.label ?? step.prompt}>
               <Button size="lg" onClick={() => submitTyped("yes")}>{t("yes")}</Button>
               <Button size="lg" variant="outline" onClick={() => submitTyped("no")}>{t("no")}</Button>
             </div>
@@ -261,6 +343,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
               <Button type="submit" size="lg" className="sm:self-end" data-testid="button-next">{t("next")}</Button>
             </form>
           )}
+          {showTalk && <Button size="lg" variant="outline" onClick={() => submitTyped(TALK_AGAIN)} data-testid="button-talk">{t("talk")}</Button>}
         </div>
       )}
 
@@ -279,8 +362,12 @@ function FormMode({ steps, onSubmit, onSwitch, submitLabel }: { steps: Step[]; o
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState("");
   const [busy, setBusy] = useState(false);
+  const firstRef = useRef<HTMLInputElement | HTMLSelectElement>(null);
   const visible = steps.filter((s) => !s.when || s.when(values));
   const set = (k: string, v: string) => setValues((o) => ({ ...o, [k]: v }));
+
+  // フォームに切り替えたら最初の項目にフォーカスを置く
+  useEffect(() => { firstRef.current?.focus(); }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -292,7 +379,12 @@ function FormMode({ steps, onSubmit, onSwitch, submitLabel }: { steps: Step[]; o
       if (s.type === "email" && v && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) errs[s.key] = t("error");
     }
     setErrors(errs);
-    if (Object.keys(errs).length) return;
+    if (Object.keys(errs).length) {
+      // 最初の間違いの項目へフォーカスを移す
+      const firstKey = visible.find((s) => errs[s.key])?.key;
+      if (firstKey) document.getElementById(`f-${firstKey}`)?.focus();
+      return;
+    }
     setBusy(true);
     setFormError("");
     const out: Values = {};
@@ -304,18 +396,18 @@ function FormMode({ steps, onSubmit, onSwitch, submitLabel }: { steps: Step[]; o
 
   return (
     <form onSubmit={submit} className="space-y-5" noValidate>
-      {visible.map((s) => {
+      {visible.map((s, i) => {
         const id = `f-${s.key}`;
         const label = `${s.label ?? s.prompt}${s.optional ? " " + t("optional") : ""}`;
         return (
           <div key={s.key}>
             <Label htmlFor={id}>{label}</Label>
             {s.type === "choice" || s.type === "yesno" ? (
-              <select id={id} className="flex min-h-12 w-full rounded-md border-2 border-input bg-card px-3 py-2 text-base" value={values[s.key]} onChange={(e) => set(s.key, e.target.value)} data-testid={`select-${s.key}`}>
+              <select id={id} ref={i === 0 ? (firstRef as React.RefObject<HTMLSelectElement>) : undefined} className="flex min-h-12 w-full rounded-md border-2 border-input bg-card px-3 py-2 text-base" value={values[s.key]} onChange={(e) => set(s.key, e.target.value)} data-testid={`select-${s.key}`}>
                 {(s.type === "yesno" ? [{ value: "yes", label: t("yes") }, { value: "no", label: t("no") }] : s.choices ?? []).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
               </select>
             ) : (
-              <Input id={id} type={s.type === "secret" ? "password" : s.type === "email" ? "email" : s.type === "phone" ? "tel" : s.type === "number" ? "number" : s.type === "time" ? "time" : "text"}
+              <Input id={id} ref={i === 0 ? (firstRef as React.RefObject<HTMLInputElement>) : undefined} type={s.type === "secret" ? "password" : s.type === "email" ? "email" : s.type === "phone" ? "tel" : s.type === "number" ? "number" : s.type === "time" ? "time" : "text"}
                 value={values[s.key]} onChange={(e) => set(s.key, e.target.value)} aria-invalid={!!errors[s.key]} aria-describedby={errors[s.key] ? `${id}-err` : undefined}
                 autoComplete={s.type === "secret" ? "new-password" : undefined} data-testid={`input-${s.key}`} />
             )}

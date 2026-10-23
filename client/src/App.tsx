@@ -7,6 +7,7 @@ import Admin from "@/pages/Admin";
 import Book from "@/pages/Book";
 import Lookup from "@/pages/Lookup";
 import PayResult from "@/pages/PayResult";
+import VoiceSettings from "@/pages/VoiceSettings";
 import { Layout } from "@/components/Layout";
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
       <Route path="/book/:slug">{(params) => <Book slug={params.slug} />}</Route>
       <Route path="/lookup" component={Lookup} />
       <Route path="/pay/result" component={PayResult} />
+      <Route path="/voice" component={VoiceSettings} />
       <Route><Layout title="404"><p>Not found</p></Layout></Route>
     </Switch>
   );

@@ -21,32 +21,117 @@ export const sttSupported = () => typeof window !== "undefined" && recognitionCt
 export class SpeechNotAllowed extends Error {}
 
 let voicesReady: Promise<SpeechSynthesisVoice[]> | null = null;
-function loadVoices(): Promise<SpeechSynthesisVoice[]> {
+/** 端末に入っている声の一覧。最初は空で返ってくるブラウザがあるので、揃うまで少し待つ */
+export function loadVoices(): Promise<SpeechSynthesisVoice[]> {
+  if (!ttsSupported()) return Promise.resolve([]);
   if (!voicesReady) {
     voicesReady = new Promise((resolve) => {
       const have = speechSynthesis.getVoices();
       if (have.length) return resolve(have);
       const timer = setTimeout(() => resolve(speechSynthesis.getVoices()), 1500);
-      speechSynthesis.onvoiceschanged = () => { clearTimeout(timer); resolve(speechSynthesis.getVoices()); };
+      speechSynthesis.addEventListener("voiceschanged", () => { clearTimeout(timer); resolve(speechSynthesis.getVoices()); }, { once: true });
     });
+    // 空のまま確定したら次回また調べる
+    voicesReady.then((v) => { if (!v.length) voicesReady = null; });
   }
   return voicesReady;
 }
 
+// ---------- 声の設定（端末ごとに保存。声は端末に入っているものなので、アカウントではなく端末に紐づける） ----------
+export type VoiceLang = "ja" | "en";
+export type Gender = "female" | "male";
+export type Rate = "slow" | "normal" | "fast";
+export type VoicePref = { gender: Gender; voice: string | null; rate: Rate };
+export type VoicePrefs = { ja: VoicePref; en: VoicePref; mute: boolean };
+
+const PREFS_KEY = "voicePrefs";
+const DEFAULT_PREFS: VoicePrefs = { ja: { gender: "female", voice: null, rate: "normal" }, en: { gender: "female", voice: null, rate: "normal" }, mute: false };
+let prefsCache: VoicePrefs | null = null;
+
+export function getVoicePrefs(): VoicePrefs {
+  if (prefsCache) return prefsCache;
+  let saved: Partial<VoicePrefs> = {};
+  try { saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}"); } catch { /* 使えない環境 */ }
+  prefsCache = { ja: { ...DEFAULT_PREFS.ja, ...saved.ja }, en: { ...DEFAULT_PREFS.en, ...saved.en }, mute: !!saved.mute };
+  return prefsCache;
+}
+
+export function setVoicePrefs(next: VoicePrefs) {
+  prefsCache = next;
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(next)); } catch { /* 無視 */ }
+}
+
+export const voiceLangOf = (lang: string): VoiceLang => (lang.toLowerCase().startsWith("ja") ? "ja" : "en");
+const normLang = (l: string) => l.replace("_", "-").toLowerCase();
+
+// Web Speech API は声の性別を教えてくれないので、名前から見当をつける
+const FEMALE_NAMES = new Set(["female", "woman", "ayumi", "haruka", "sayaka", "nanami", "mayu", "aoi", "shiori", "kyoko", "oren", "o-ren",
+  "samantha", "ava", "allison", "susan", "zoe", "karen", "moira", "tessa", "fiona", "victoria", "kate", "serena", "zira", "aria", "jenny", "michelle", "ana", "emma",
+  "libby", "sonia", "natasha", "hazel", "nicky", "joelle", "kathy", "princess", "vicki", "agnes", "catherine", "hayley", "flo", "grandma", "sandy", "shelley",
+  "olivia", "amber", "ashley", "cora", "elizabeth", "monica", "sara", "nancy", "jane", "clara", "molly", "mia", "maisie", "abbi", "bella", "hollie", "isla"]);
+const MALE_NAMES = new Set(["male", "man", "ichiro", "keita", "naoki", "daichi", "otoya", "hattori",
+  "alex", "daniel", "fred", "tom", "oliver", "arthur", "aaron", "david", "mark", "guy", "ryan", "christopher", "eric", "steffan", "thomas", "brian", "andrew", "roger",
+  "george", "james", "william", "liam", "lee", "bruce", "junior", "ralph", "albert", "rishi", "gordon", "evan", "nathan", "eddy", "grandpa", "reed", "rocko",
+  "jacob", "ethan", "noah", "ollie", "kai", "luke", "ian", "duncan", "jack", "neil", "kevin", "matthew", "connor", "elliot", "henry", "brandon", "jason", "oscar"]);
+const FEMALE_PHRASES = /google us english|google 日本語|google にほんご|google japanese/i;
+// 質の見当：自然な声（ネットワーク音声や高品質版）を上に、Mac の古い声や遊びの声を下に
+const GOOD_QUALITY = /natural|neural|online|premium|enhanced|google|siri|wavenet|journey|studio/i;
+const POOR_QUALITY = /bad news|bahh|bells|boing|bubbles|cellos|good news|jester|organ|superstar|trinoids|whisper|wobble|zarvox|deranged|hysterical|\b(albert|ralph|junior|princess|kathy|fred|bruce|agnes|vicki|victoria|eddy|flo|grandma|grandpa|reed|rocko|sandy|shelley)\b/i;
+
+export function guessGender(v: SpeechSynthesisVoice): Gender | null {
+  if (FEMALE_PHRASES.test(v.name)) return "female";
+  const tokens = v.name.toLowerCase().split(/[^a-z-]+/);
+  if (tokens.some((x) => FEMALE_NAMES.has(x))) return "female";
+  if (tokens.some((x) => MALE_NAMES.has(x))) return "male";
+  return null;
+}
+
+/** その言語の声だけを、使いたい順に並べて返す。日本語の文を英語の声が読んだり、その逆は起こさない */
+export function voicesFor(voices: SpeechSynthesisVoice[], lang: string, pref: VoicePref = getVoicePrefs()[voiceLangOf(lang)]): SpeechSynthesisVoice[] {
+  const key = voiceLangOf(lang);
+  const want = normLang(lang);
+  const score = (v: SpeechSynthesisVoice) => {
+    const g = guessGender(v);
+    return (g === pref.gender ? 4 : g === null ? 1 : -4)
+      + (GOOD_QUALITY.test(v.name) ? 2 : 0) - (POOR_QUALITY.test(v.name) ? 3 : 0)
+      + (normLang(v.lang) === want ? 1 : 0) + (v.default ? 0.5 : 0);
+  };
+  return voices.filter((v) => normLang(v.lang).startsWith(key)).sort((a, b) => score(b) - score(a));
+}
+
+export function pickVoice(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice | undefined {
+  const pref = getVoicePrefs()[voiceLangOf(lang)];
+  const cands = voicesFor(voices, lang, pref);
+  if (pref.voice) {
+    const chosen = cands.find((v) => v.voiceURI === pref.voice || v.name === pref.voice);
+    if (chosen) return chosen;
+  }
+  return cands[0];
+}
+
+const RATE: Record<Rate, number> = { slow: 0.85, normal: 1, fast: 1.2 };
+
 export type SpeakOptions = { pitch?: number; rate?: number };
 
-/** 読み上げる。終わったら resolve。ブラウザの自動再生制限なら SpeechNotAllowed で reject */
+/** 読み上げる。終わったら resolve。ブラウザの自動再生制限なら SpeechNotAllowed で reject。
+ *  「アプリの読み上げを止める」設定のときは何もしない（スクリーンリーダーに任せる） */
 export async function speak(text: string, lang: string, opts: SpeakOptions = {}): Promise<void> {
   if (!ttsSupported() || !text) return;
+  const prefs = getVoicePrefs();
+  if (prefs.mute) return;
   speechSynthesis.cancel();
   const voices = await loadVoices();
   return new Promise((resolve, reject) => {
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = lang;
-    u.pitch = opts.pitch ?? 1;
-    u.rate = opts.rate ?? 1;
-    const v = voices.find((x) => x.lang.replace("_", "-").toLowerCase() === lang.toLowerCase()) ?? voices.find((x) => x.lang.toLowerCase().startsWith(lang.slice(0, 2).toLowerCase()));
+    const key = voiceLangOf(lang);
+    const v = pickVoice(voices, lang);
+    // 声が見つかればその声の言語に合わせる（ja-JP の文を en-GB の声で読まない）
+    u.lang = v ? v.lang : lang;
     if (v) u.voice = v;
+    // 英語で声を低くすると威圧的に聞こえるので、高さの変化を半分にする
+    const pitch = opts.pitch ?? 1;
+    u.pitch = key === "en" ? 1 + (pitch - 1) / 2 : pitch;
+    u.rate = opts.rate ?? RATE[prefs[key].rate] * (key === "en" ? 0.95 : 1);
     let settled = false;
     u.onend = () => { if (!settled) { settled = true; resolve(); } };
     u.onerror = (e) => {
@@ -60,6 +145,15 @@ export async function speak(text: string, lang: string, opts: SpeakOptions = {})
     // 一部のブラウザは onend を落とすので、長さに応じた保険
     setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 2000 + text.length * 180);
   });
+}
+
+/** 設定画面の試し聞き。設定で止めていても鳴らす */
+export async function previewVoice(lang: VoiceLang, pref: VoicePref): Promise<void> {
+  if (!ttsSupported()) return;
+  const saved = getVoicePrefs();
+  prefsCache = { ...saved, [lang]: pref, mute: false };
+  try { await speak(lang === "ja" ? "こんにちは、ご予約ちゃんです。ご予約を承ります。" : "Hello, this is GoYoyaku-chan. I can take your booking.", lang === "ja" ? "ja-JP" : "en-US"); }
+  finally { prefsCache = saved; }
 }
 
 export function stopSpeaking() {

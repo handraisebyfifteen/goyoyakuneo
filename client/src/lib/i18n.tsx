@@ -71,6 +71,15 @@ const ja: Dict = {
   refundYes: "キャンセルの決まりにより全額返金の対象です。返金は店舗から行われます。", refundNo: "キャンセルの期限を過ぎているため、返金の対象外です。",
   weekdayShort: "月,火,水,木,金,土,日", optional: "（任意）", required: "（必須）", error: "エラー", loading: "読み込み中…",
   emailNote: "確認メールをお送りします", minutesUnit: "{n}分", none: "なし", skip: "そのまま",
+  voiceSettings: "声の設定", voiceSettingsSpeech: "声の設定です。日本語と英語それぞれで、女性の声か男性の声かを選べます。設定はこの端末に保存されます。",
+  voiceForJa: "日本語の声", voiceForEn: "英語の声", voiceGender: "声の種類", female: "女性", male: "男性",
+  voicePick: "使う声", voiceAuto: "自動（おすすめ）", rate: "速さ", rateSlow: "ゆっくり", rateNormal: "ふつう", rateFast: "はやい", preview: "試しに聞く",
+  noVoicesFor: "この端末には{lang}の声が入っていません。端末の設定から音声を追加してください。", ttsUnsupported: "このブラウザは読み上げに対応していません。",
+  muteApp: "アプリの読み上げを止める（スクリーンリーダーをお使いの方向け）", muteNote: "止めると、質問は画面の文字だけになり、マイクは「話す」ボタンを押したときだけ聞き取ります。",
+  saved: "保存しました", talk: "話す", langNameJa: "日本語", langNameEn: "英語", srHeading: "スクリーンリーダーをお使いの方へ",
+  micBlocked: "マイクが使えないため、声では聞き取れません。入力欄に打ち込んでください。",
+  typeOrTalk: "聞き取れませんでした。入力欄に打ち込むか、「話す」ボタンを押してもう一度お話しください。",
+  langSwitchHint: "いつでも「English」と言えば英語に切り替わります。",
 };
 
 const en: Dict = {
@@ -138,6 +147,15 @@ const en: Dict = {
   refundYes: "Under the cancellation policy this is eligible for a full refund. The shop will issue it.", refundNo: "The cancellation deadline has passed, so this is not refundable.",
   weekdayShort: "Mon,Tue,Wed,Thu,Fri,Sat,Sun", optional: "(optional)", required: "(required)", error: "Error", loading: "Loading…",
   emailNote: "We will send a confirmation email", minutesUnit: "{n} min", none: "None", skip: "Keep",
+  voiceSettings: "Voice settings", voiceSettingsSpeech: "Voice settings. For Japanese and English, choose a female or male voice. Settings are saved on this device.",
+  voiceForJa: "Japanese voice", voiceForEn: "English voice", voiceGender: "Voice type", female: "Female", male: "Male",
+  voicePick: "Voice", voiceAuto: "Automatic (recommended)", rate: "Speed", rateSlow: "Slow", rateNormal: "Normal", rateFast: "Fast", preview: "Preview",
+  noVoicesFor: "This device has no {lang} voices installed. Add one in your device settings.", ttsUnsupported: "This browser does not support speech output.",
+  muteApp: "Turn off the app's own speech (for screen reader users)", muteNote: "When off, questions appear as text only and the microphone listens only when you press Talk.",
+  saved: "Saved", talk: "Talk", langNameJa: "Japanese", langNameEn: "English", srHeading: "For screen reader users",
+  micBlocked: "The microphone is not available, so I cannot listen. Please type your answer.",
+  typeOrTalk: "I could not catch that. Please type your answer, or press Talk and say it again.",
+  langSwitchHint: "Say Japanese at any time to switch to Japanese.",
 };
 
 const DICT: Record<Lang, Dict> = { ja, en };
