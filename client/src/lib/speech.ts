@@ -124,6 +124,19 @@ let lastError: string | null = null;
 /** 直前の読み上げが失敗していれば、その理由（取り出すと消える） */
 export function takeSpeakError(): string | null { const e = lastError; lastError = null; return e; }
 
+let unlocked = false;
+/** ユーザー操作（クリック・キー）の中で同期的に呼ぶ。iOS Safari などは最初の読み上げが操作の直後でないと鳴らないので、
+ *  空の読み上げで音を解放しておく。以後は操作の外からでも鳴る */
+export function unlockSpeech() {
+  if (!ttsSupported() || unlocked) return;
+  try {
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0.01;
+    speechSynthesis.speak(u);
+    unlocked = true;
+  } catch { /* 無視 */ }
+}
+
 /** ブラウザが音を出してよい状態か（ページ内を一度でも操作したか）。わからないブラウザでは true */
 export function userActivated(): boolean {
   const ua = (navigator as unknown as { userActivation?: { hasBeenActive: boolean } }).userActivation;

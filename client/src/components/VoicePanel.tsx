@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n } from "@/lib/i18n";
 import { apiRequest, ApiRequestError } from "@/lib/queryClient";
-import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, SpeechNotAllowed } from "@/lib/speech";
+import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, unlockSpeech, SpeechNotAllowed } from "@/lib/speech";
 
 type Model = "daily" | "consult";
 type Msg = { id: number; role: "user" | "assistant"; text: string; model?: Model; kind?: "confirm" | "passphrase" };
@@ -256,7 +256,7 @@ export function VoicePanel({ onChanged }: { onChanged?: () => void }) {
 
   useEffect(() => {
     if (!needsGesture) return;
-    const retry = () => { setNeedsGesture(false); speak(t("voiceWelcome"), speechLang).catch(() => { /* 無視 */ }); };
+    const retry = () => { unlockSpeech(); setNeedsGesture(false); speak(t("voiceWelcome"), speechLang).catch(() => { /* 無視 */ }); };
     window.addEventListener("keydown", retry, { once: true });
     window.addEventListener("pointerdown", retry, { once: true });
     return () => { window.removeEventListener("keydown", retry); window.removeEventListener("pointerdown", retry); };

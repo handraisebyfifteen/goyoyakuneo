@@ -110,6 +110,7 @@ export default function VoiceSettings() {
           </section>
         </section>
 
+        <p><Button variant="link" asChild><Link href="/voice-check" data-testid="link-voice-check">{t("voiceCheck")}</Link></Button></p>
         <p role="status" aria-live="polite" className="text-sm text-muted-foreground min-h-5">{savedMsg}</p>
       </div>
     </Layout>

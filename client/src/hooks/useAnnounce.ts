@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { speak, SpeechNotAllowed, stopSpeaking } from "@/lib/speech";
+import { speak, SpeechNotAllowed, stopSpeaking, unlockSpeech } from "@/lib/speech";
 
 /** ページを開いたら、何のページかを声で案内する。自動再生が止められたら、次の操作で読み上げる */
 export function useAnnounce(text: string, lang: string, enabled = true) {
@@ -11,7 +11,7 @@ export function useAnnounce(text: string, lang: string, enabled = true) {
       if (e instanceof SpeechNotAllowed && !cancelled) setNeedsGesture(true);
     });
     tryOnce();
-    const onGesture = () => { tryOnce(); window.removeEventListener("keydown", onGesture); window.removeEventListener("pointerdown", onGesture); };
+    const onGesture = () => { unlockSpeech(); tryOnce(); window.removeEventListener("keydown", onGesture); window.removeEventListener("pointerdown", onGesture); };
     window.addEventListener("keydown", onGesture);
     window.addEventListener("pointerdown", onGesture);
     return () => {

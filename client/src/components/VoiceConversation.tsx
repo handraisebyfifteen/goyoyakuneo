@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n, type Lang } from "@/lib/i18n";
-import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, parseSpokenEmail, parseSpokenPhone, parseSpokenNumber, parseSpokenTime, getVoicePrefs, takeSpeakError, SpeechNotAllowed } from "@/lib/speech";
+import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, parseSpokenEmail, parseSpokenPhone, parseSpokenNumber, parseSpokenTime, getVoicePrefs, takeSpeakError, unlockSpeech, SpeechNotAllowed } from "@/lib/speech";
 
 export type Choice = { value: string; label: string; aliases?: string[] };
 export type Step = {
@@ -291,7 +291,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
   }, [mode, lang]);
 
   // 音を出す許可がまだなら、ページ内のどんな操作でも（ボタン、キー、タップ）最初からやり直す
-  const startVoice = useCallback(() => { setNeedsGesture(false); valuesRef.current = {}; runFrom(0); }, [runFrom]);
+  const startVoice = useCallback(() => { unlockSpeech(); setNeedsGesture(false); valuesRef.current = {}; runFrom(0); }, [runFrom]);
   useEffect(() => {
     if (!needsGesture) return;
     window.addEventListener("keydown", startVoice, { once: true });
