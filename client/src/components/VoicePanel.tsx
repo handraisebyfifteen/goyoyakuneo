@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n } from "@/lib/i18n";
 import { apiRequest, ApiRequestError } from "@/lib/queryClient";
-import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, unlockSpeech, SpeechNotAllowed } from "@/lib/speech";
+import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, unlockSpeech, SpeechNotAllowed, isTouchDevice } from "@/lib/speech";
 
 type Model = "daily" | "consult";
 type Msg = { id: number; role: "user" | "assistant"; text: string; model?: Model; kind?: "confirm" | "passphrase" };
@@ -27,16 +27,17 @@ type Reply =
 const PITCH: Record<Model, number> = { daily: 1.05, consult: 0.8 };
 const MAX_SHOWN = 14;
 
-export function VoicePanel({ onChanged }: { onChanged?: () => void }) {
+export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void; onShareLink?: () => void }) {
   const { t, lang, speechLang } = useI18n();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
-  const [continuous, setContinuous] = useState(true);
+  // スマホは返事を VoiceOver が読むので、読み終わりを待たずに聞き始めないよう、連続モードは最初は切っておく
+  const [continuous, setContinuous] = useState(() => !isTouchDevice());
   const [typed, setTyped] = useState("");
   const [error, setError] = useState("");
   const [needsGesture, setNeedsGesture] = useState(false);
   const pendingRef = useRef<{ id: string; stage: "confirm" | "passphrase" } | null>(null);
-  const continuousRef = useRef(true);
+  const continuousRef = useRef(continuous);
   const runId = useRef(0);
   const nextId = useRef(1);
   const announced = useRef(false);
@@ -74,8 +75,15 @@ export function VoicePanel({ onChanged }: { onChanged?: () => void }) {
       push({ role: "assistant", text: reply.text, model: reply.model });
       if (reply.changed) onChanged?.();
       const cam = (reply.actions ?? []).find((a) => a.action === "open_camera");
+      const share = (reply.actions ?? []).some((a) => a.action === "share_link");
       await say(reply.text, reply.model);
       if (!alive()) return;
+      if (share) {
+        // 共有画面は操作の中でしか開けないので、送るボタンへフォーカスを移して押してもらう
+        setPhase("idle");
+        onShareLink?.();
+        return;
+      }
       if (cam) {
         // 「お金を確認」→ カメラを開く。読み取りが終わるまで聞き取りはしない
         setCameraFor({ reservationId: Number(cam.reservationId), customerName: String(cam.customerName ?? "") });
@@ -245,18 +253,22 @@ export function VoicePanel({ onChanged }: { onChanged?: () => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onMic]);
 
-  // 開いたら案内する（自動再生が止められたら、次の操作で）
+  // 開いたら、新しい予約・取り消しと今日の予定を伝える（初めてならあいさつ）。履歴を読み込んでから足す。
+  // 自動再生が止められたら、次の操作で読み上げる
+  const welcomeRef = useRef("");
   useEffect(() => {
-    if (announced.current || !status.data?.aiConfigured) return;
+    if (announced.current || !history.data) return;
     announced.current = true;
-    const text = t("voiceWelcome");
-    speak(text, speechLang).catch((e) => { if (e instanceof SpeechNotAllowed) setNeedsGesture(true); });
+    const sayWelcome = (text: string) => { welcomeRef.current = text; speak(text, speechLang).catch((e) => { if (e instanceof SpeechNotAllowed) setNeedsGesture(true); }); };
+    apiRequest<{ text: string }>("POST", "/api/voice/briefing")
+      .then((b) => { push({ role: "assistant", text: b.text }); sayWelcome(b.text); })
+      .catch(() => sayWelcome(t("voiceWelcome")));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.data?.aiConfigured]);
+  }, [history.data]);
 
   useEffect(() => {
     if (!needsGesture) return;
-    const retry = () => { unlockSpeech(); setNeedsGesture(false); speak(t("voiceWelcome"), speechLang).catch(() => { /* 無視 */ }); };
+    const retry = () => { unlockSpeech(); setNeedsGesture(false); speak(welcomeRef.current || t("voiceWelcome"), speechLang).catch(() => { /* 無視 */ }); };
     window.addEventListener("keydown", retry, { once: true });
     window.addEventListener("pointerdown", retry, { once: true });
     return () => { window.removeEventListener("keydown", retry); window.removeEventListener("pointerdown", retry); };

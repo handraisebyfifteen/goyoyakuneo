@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useI18n } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import { Volume2 } from "lucide-react";
+import { isTouchDevice } from "@/lib/speech";
 
 export function Layout({ children, title, right }: { children: ReactNode; title?: string; right?: ReactNode }) {
   const { t, lang, setLang } = useI18n();
@@ -12,12 +13,13 @@ export function Layout({ children, title, right }: { children: ReactNode; title?
       <header className="border-b-2 bg-card">
         <div className="mx-auto max-w-3xl px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
           <Link href="/" className="text-lg font-bold" data-testid="link-home">{t("appName")}</Link>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {right}
-            <Button variant="outline" size="sm" asChild><Link href="/voice" data-testid="link-voice-settings"><Volume2 className="h-4 w-4" aria-hidden />{t("voiceSettings")}</Link></Button>
+            {/* スマホはアプリが声を出さない（VoiceOver に任せる）ので、声の設定は出さない */}
+            {!isTouchDevice() && <Button variant="outline" size="sm" asChild><Link href="/voice" data-testid="link-voice-settings"><Volume2 className="h-4 w-4" aria-hidden />{t("voiceSettings")}</Link></Button>}
             <div role="group" aria-label="Language" className="flex rounded-md border-2 overflow-hidden">
-              <button type="button" aria-pressed={lang === "ja"} onClick={() => setLang("ja")} className={`px-3 py-2 text-sm font-semibold ${lang === "ja" ? "bg-primary text-primary-foreground" : "bg-card"}`} data-testid="button-lang-ja">日本語</button>
-              <button type="button" aria-pressed={lang === "en"} onClick={() => setLang("en")} className={`px-3 py-2 text-sm font-semibold ${lang === "en" ? "bg-primary text-primary-foreground" : "bg-card"}`} data-testid="button-lang-en">English</button>
+              <button type="button" aria-pressed={lang === "ja"} onClick={() => setLang("ja")} className={`px-3 py-2 text-sm font-semibold whitespace-nowrap ${lang === "ja" ? "bg-primary text-primary-foreground" : "bg-card"}`} data-testid="button-lang-ja">日本語</button>
+              <button type="button" aria-pressed={lang === "en"} onClick={() => setLang("en")} className={`px-3 py-2 text-sm font-semibold whitespace-nowrap ${lang === "en" ? "bg-primary text-primary-foreground" : "bg-card"}`} data-testid="button-lang-en">English</button>
             </div>
           </div>
         </div>

@@ -28,6 +28,8 @@ export type Step = {
   optional?: boolean;
   defaultValue?: string;
   validate?: (value: string) => string | null;
+  /** 入力欄の autocomplete（ログインなら "current-password" など） */
+  autoComplete?: string;
   when?: (values: Record<string, string>) => boolean;
   /** 質問の前に鳴らすもの（声の見本など） */
   before?: () => Promise<void>;
@@ -290,13 +292,22 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, lang]);
 
-  // 音を出す許可がまだなら、ページ内のどんな操作でも（ボタン、キー、タップ）最初からやり直す
+  // 音を出す許可がまだなら、ページ内の操作（キー、タップ）で最初からやり直す。
+  // ただしボタン・リンク・入力欄の操作は、それぞれの働きを優先して音の解放だけにする
+  // （やり直すと配置がずれて押したボタンに届かない、打った文字が消える、などが起きるため）
   const startVoice = useCallback(() => { unlockSpeech(); setNeedsGesture(false); valuesRef.current = {}; runFrom(0); }, [runFrom]);
   useEffect(() => {
     if (!needsGesture) return;
-    window.addEventListener("keydown", startVoice, { once: true });
-    window.addEventListener("pointerdown", startVoice, { once: true });
-    return () => { window.removeEventListener("keydown", startVoice); window.removeEventListener("pointerdown", startVoice); };
+    const onGesture = (e: Event) => {
+      const el = e.target instanceof Element ? e.target : null;
+      if (el?.closest("button, a, input, select, textarea, label, [role=button]")) { unlockSpeech(); return; }
+      window.removeEventListener("keydown", onGesture);
+      window.removeEventListener("pointerdown", onGesture);
+      startVoice();
+    };
+    window.addEventListener("keydown", onGesture);
+    window.addEventListener("pointerdown", onGesture);
+    return () => { window.removeEventListener("keydown", onGesture); window.removeEventListener("pointerdown", onGesture); };
   }, [needsGesture, startVoice]);
 
   function submitTyped(value: string) {
@@ -320,7 +331,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
 
   // ---------- フォーム表示 ----------
   if (mode === "form") {
-    return <FormMode steps={steps} onSubmit={async (values) => { valuesRef.current = values; return finish(); }} onSwitch={() => onModeChange("voice")} submitLabel={submitLabel} />;
+    return <FormMode steps={steps} onSubmit={async (values) => { valuesRef.current = values; return onComplete({ ...values }); }} onSwitch={() => onModeChange("voice")} submitLabel={submitLabel} />;
   }
 
   const statusLabel = status === "listening" ? t("listening") : status === "speaking" ? t("speaking") : status === "submitting" ? t("processing") : "";
@@ -370,7 +381,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
                 <Label htmlFor="voice-typed">{step.label ?? t("typeAnswer")}</Label>
                 <Input id="voice-typed" ref={inputRef} type={step.type === "secret" ? "password" : step.type === "email" ? "email" : step.type === "phone" ? "tel" : step.type === "number" ? "number" : "text"}
                   inputMode={step.type === "number" ? "decimal" : step.type === "phone" ? "tel" : undefined}
-                  autoComplete={step.type === "secret" ? "off" : undefined}
+                  autoComplete={step.autoComplete ?? (step.type === "secret" ? "off" : undefined)}
                   value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={step.defaultValue} data-testid={`input-${step.key}`} />
               </div>
               <Button type="submit" size="lg" className="sm:self-end" data-testid="button-next">{t("next")}</Button>
@@ -389,7 +400,7 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
   );
 }
 
-function FormMode({ steps, onSubmit, onSwitch, submitLabel }: { steps: Step[]; onSubmit: (v: Values) => Promise<boolean>; onSwitch: () => void; submitLabel?: string }) {
+function FormMode({ steps, onSubmit, onSwitch, submitLabel }: { steps: Step[]; onSubmit: (v: Values) => Promise<string | void>; onSwitch: () => void; submitLabel?: string }) {
   const { t } = useI18n();
   const [values, setValues] = useState<Values>(() => Object.fromEntries(steps.map((s) => [s.key, s.defaultValue ?? (s.type === "yesno" ? "yes" : s.type === "choice" ? s.choices?.[0]?.value ?? "" : "")])));
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -422,9 +433,10 @@ function FormMode({ steps, onSubmit, onSwitch, submitLabel }: { steps: Step[]; o
     setFormError("");
     const out: Values = {};
     for (const s of visible) out[s.key] = values[s.key] ?? "";
-    const ok = await onSubmit(out);
+    // 失敗したら理由をそのまま出す（読み上げはスクリーンリーダーの role="alert" に任せる）
+    const err = await onSubmit(out);
     setBusy(false);
-    if (!ok) setFormError(t("error"));
+    if (err) setFormError(err);
   }
 
   return (
@@ -442,7 +454,7 @@ function FormMode({ steps, onSubmit, onSwitch, submitLabel }: { steps: Step[]; o
             ) : (
               <Input id={id} ref={i === 0 ? (firstRef as React.RefObject<HTMLInputElement>) : undefined} type={s.type === "secret" ? "password" : s.type === "email" ? "email" : s.type === "phone" ? "tel" : s.type === "number" ? "number" : s.type === "time" ? "time" : "text"}
                 value={values[s.key]} onChange={(e) => set(s.key, e.target.value)} aria-invalid={!!errors[s.key]} aria-describedby={errors[s.key] ? `${id}-err` : undefined}
-                autoComplete={s.type === "secret" ? "new-password" : undefined} data-testid={`input-${s.key}`} />
+                autoComplete={s.autoComplete ?? (s.type === "secret" ? "new-password" : undefined)} data-testid={`input-${s.key}`} />
             )}
             {errors[s.key] && <p id={`${id}-err`} className="text-destructive mt-1" role="alert">{errors[s.key]}</p>}
           </div>

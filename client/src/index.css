@@ -72,3 +72,10 @@
   :focus-visible { outline: 3px solid hsl(var(--ring)); outline-offset: 3px; }
   .sr-only-focusable:focus { @apply not-sr-only; }
 }
+
+/* QR コードの印刷：QR の札だけを紙に出す */
+@media print {
+  body * { visibility: hidden; }
+  #qr-print, #qr-print * { visibility: visible; }
+  #qr-print { position: absolute; left: 0; top: 0; border: none; }
+}

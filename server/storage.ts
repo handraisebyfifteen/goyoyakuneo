@@ -4,9 +4,9 @@
 import { and, asc, desc, eq, gte, lt, lte, ne, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
-  owners, customers, menus, reservations, blockedSlots, chatMessages, voiceSessions, emailLog,
+  owners, customers, menus, reservations, blockedSlots, chatMessages, voiceSessions, emailLog, coupons, staff, timeEntries, shopGroups, shifts, attendanceEvents,
   type Owner, type PublicOwner, type Customer, type Menu, type InsertMenu, type Reservation, type InsertReservation,
-  type BlockedSlot, type Language,
+  type BlockedSlot, type Language, type Coupon, type Staff, type PublicStaff, type TimeEntry, type ShopGroup, type Shift, type AttendanceEvent,
 } from "@shared/schema";
 import { money, type Money } from "@shared/money";
 import { toLocal, fromLocal, addDays } from "./lib/time";
@@ -31,11 +31,17 @@ export async function getOwnerByEmail(email: string): Promise<Owner | undefined>
 export async function getOwnerBySlug(slug: string): Promise<Owner | undefined> {
   return (await db.select().from(owners).where(eq(owners.slug, slug)))[0];
 }
+export async function getOwnerByCalendarToken(token: string): Promise<Owner | undefined> {
+  return (await db.select().from(owners).where(eq(owners.calendarToken, token)))[0];
+}
 export async function createOwner(values: typeof owners.$inferInsert): Promise<Owner> {
   return (await db.insert(owners).values(values).returning())[0];
 }
 export async function updateOwner(id: number, patch: Partial<typeof owners.$inferInsert>): Promise<Owner> {
   return (await db.update(owners).set(patch).where(eq(owners.id, id)).returning())[0];
+}
+export async function listOwners(): Promise<Owner[]> {
+  return db.select().from(owners).orderBy(asc(owners.id));
 }
 export async function ownerHasMenusOrReservations(ownerId: number): Promise<boolean> {
   const m = await db.select({ id: menus.id }).from(menus).where(eq(menus.ownerId, ownerId)).limit(1);
@@ -56,16 +62,39 @@ export function cleanPhone(phone: string): string {
   return (phone || "").normalize("NFKC").replace(/[^\d+]/g, "");
 }
 
+/**
+ * 同じお客さんを探して使う。なければ作る。
+ * 電話番号があれば電話番号で探す。なければ名前で探す（電話番号なしの人を全員ひとりにまとめないため）。
+ * 電話番号なしで記録した人に、あとから電話番号つきの予約が来たら、その人に電話番号を足す。
+ */
 export async function upsertCustomer(ownerId: number, name: string, phone: string, email?: string | null): Promise<Customer> {
-  const existing = (await db.select().from(customers).where(and(eq(customers.ownerId, ownerId), eq(customers.phone, phone))))[0];
+  const byName = async (onlyWithoutPhone: boolean) => (await db.select().from(customers)
+    .where(and(eq(customers.ownerId, ownerId), eq(customers.name, name), ...(onlyWithoutPhone ? [eq(customers.phone, "")] : [])))
+    .orderBy(desc(customers.id)))[0];
+  const byPhone = phone ? (await db.select().from(customers).where(and(eq(customers.ownerId, ownerId), eq(customers.phone, phone))))[0] : undefined;
+  const existing = phone ? byPhone ?? (await byName(true)) : await byName(false);
   if (existing) {
     const patch: Partial<Customer> = {};
+    if (phone && !existing.phone) patch.phone = phone;
     if (name && name !== existing.name) patch.name = name;
     if (email && email !== existing.email) patch.email = email;
     if (Object.keys(patch).length) return (await db.update(customers).set(patch).where(eq(customers.id, existing.id)).returning())[0];
     return existing;
   }
   return (await db.insert(customers).values({ ownerId, name, phone, email: email || null }).returning())[0];
+}
+
+export async function getCustomer(ownerId: number, id: number): Promise<Customer | undefined> {
+  return (await db.select().from(customers).where(and(eq(customers.ownerId, ownerId), eq(customers.id, id))))[0];
+}
+export async function updateCustomer(ownerId: number, id: number, patch: Partial<Pick<Customer, "name" | "phone" | "email" | "notes">>): Promise<Customer | undefined> {
+  return (await db.update(customers).set(patch).where(and(eq(customers.ownerId, ownerId), eq(customers.id, id))).returning())[0];
+}
+/** そのお客さんの予約すべて（取り消しも含む、古い順） */
+export async function listReservationsOfCustomer(ownerId: number, customerId: number): Promise<ReservationRow[]> {
+  const rows = await db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
+    .where(and(eq(reservations.ownerId, ownerId), eq(reservations.customerId, customerId))).orderBy(asc(reservations.startAt));
+  return joinRows(rows);
 }
 
 export async function findCustomersByName(ownerId: number, name: string): Promise<Customer[]> {
@@ -105,6 +134,137 @@ export async function updateMenu(ownerId: number, id: number, patch: Partial<Ins
   return (await db.update(menus).set(patch).where(and(eq(menus.ownerId, ownerId), eq(menus.id, id))).returning())[0];
 }
 
+// ---------- スタッフ ----------
+
+export function publicStaff(s: Staff): PublicStaff {
+  const { passwordHash, inviteToken, ...rest } = s;
+  return { ...rest, canLogin: !!passwordHash, invited: !!inviteToken && !passwordHash };
+}
+export async function listStaff(ownerId: number): Promise<Staff[]> {
+  return db.select().from(staff).where(eq(staff.ownerId, ownerId)).orderBy(asc(staff.sortOrder), asc(staff.id));
+}
+export async function getStaff(ownerId: number, id: number): Promise<Staff | undefined> {
+  return (await db.select().from(staff).where(and(eq(staff.ownerId, ownerId), eq(staff.id, id))))[0];
+}
+export async function getStaffById(id: number): Promise<Staff | undefined> {
+  return (await db.select().from(staff).where(eq(staff.id, id)))[0];
+}
+export async function getStaffByEmail(email: string): Promise<Staff | undefined> {
+  return (await db.select().from(staff).where(eq(staff.email, email.toLowerCase().trim())))[0];
+}
+export async function getStaffByInvite(token: string): Promise<Staff | undefined> {
+  return (await db.select().from(staff).where(eq(staff.inviteToken, token)))[0];
+}
+export async function findStaffByName(ownerId: number, name: string): Promise<Staff | undefined> {
+  const n = cleanName(name).toLowerCase();
+  const all = (await listStaff(ownerId)).filter((s) => s.active);
+  return all.find((s) => s.name.toLowerCase() === n) ?? all.find((s) => s.name.toLowerCase().includes(n) || n.includes(s.name.toLowerCase()));
+}
+export async function createStaff(values: typeof staff.$inferInsert): Promise<Staff> {
+  return (await db.insert(staff).values(values).returning())[0];
+}
+export async function updateStaff(ownerId: number, id: number, patch: Partial<typeof staff.$inferInsert>): Promise<Staff | undefined> {
+  return (await db.update(staff).set(patch).where(and(eq(staff.ownerId, ownerId), eq(staff.id, id))).returning())[0];
+}
+/** 担当の決まっていない予約を、そのスタッフに割り当てる（スタッフを初めて登録したとき） */
+export async function assignUnstaffedReservations(ownerId: number, staffId: number, staffName: string) {
+  await db.update(reservations).set({ staffId, staffName }).where(and(eq(reservations.ownerId, ownerId), sql`${reservations.staffId} IS NULL`));
+}
+/** スタッフの名前を変えたら、今後の予約の担当名も変える */
+export async function renameStaffOnReservations(ownerId: number, staffId: number, staffName: string) {
+  await db.update(reservations).set({ staffName }).where(and(eq(reservations.ownerId, ownerId), eq(reservations.staffId, staffId), gte(reservations.startAt, new Date())));
+}
+
+// ---------- 打刻 ----------
+
+export async function openTimeEntry(staffId: number): Promise<TimeEntry | undefined> {
+  return (await db.select().from(timeEntries).where(and(eq(timeEntries.staffId, staffId), sql`${timeEntries.clockOut} IS NULL`)).orderBy(desc(timeEntries.clockIn)).limit(1))[0];
+}
+export async function createTimeEntry(values: typeof timeEntries.$inferInsert): Promise<TimeEntry> {
+  return (await db.insert(timeEntries).values(values).returning())[0];
+}
+export async function updateTimeEntry(ownerId: number, id: number, patch: Partial<typeof timeEntries.$inferInsert>): Promise<TimeEntry | undefined> {
+  return (await db.update(timeEntries).set(patch).where(and(eq(timeEntries.ownerId, ownerId), eq(timeEntries.id, id))).returning())[0];
+}
+export async function getTimeEntry(ownerId: number, id: number): Promise<TimeEntry | undefined> {
+  return (await db.select().from(timeEntries).where(and(eq(timeEntries.ownerId, ownerId), eq(timeEntries.id, id))))[0];
+}
+/** オーナーがまだ確認していない打刻（古い順） */
+export async function listUnconfirmedEntries(ownerId: number): Promise<TimeEntry[]> {
+  return db.select().from(timeEntries).where(and(eq(timeEntries.ownerId, ownerId), sql`${timeEntries.confirmedAt} IS NULL`)).orderBy(asc(timeEntries.clockIn));
+}
+
+// ---------- 勤務の予定 ----------
+
+export async function getShift(staffId: number, date: string): Promise<Shift | undefined> {
+  return (await db.select().from(shifts).where(and(eq(shifts.staffId, staffId), eq(shifts.date, date))))[0];
+}
+export async function getShiftById(id: number): Promise<Shift | undefined> {
+  return (await db.select().from(shifts).where(eq(shifts.id, id)))[0];
+}
+export async function listShifts(staffId: number, from: string, to: string): Promise<Shift[]> {
+  return db.select().from(shifts).where(and(eq(shifts.staffId, staffId), gte(shifts.date, from), lte(shifts.date, to))).orderBy(asc(shifts.date));
+}
+export async function createShift(values: typeof shifts.$inferInsert): Promise<Shift> {
+  return (await db.insert(shifts).values(values).returning())[0];
+}
+export async function updateShift(id: number, patch: Partial<typeof shifts.$inferInsert>): Promise<Shift> {
+  return (await db.update(shifts).set(patch).where(eq(shifts.id, id)).returning())[0];
+}
+
+// ---------- 勤怠のお知らせ ----------
+
+export async function addAttendanceEvent(values: typeof attendanceEvents.$inferInsert): Promise<AttendanceEvent> {
+  return (await db.insert(attendanceEvents).values(values).returning())[0];
+}
+/** まだオーナーに伝えていないお知らせ（古い順） */
+export async function listUnnotifiedEvents(ownerId: number): Promise<AttendanceEvent[]> {
+  return db.select().from(attendanceEvents).where(and(eq(attendanceEvents.ownerId, ownerId), sql`${attendanceEvents.notifiedAt} IS NULL`)).orderBy(asc(attendanceEvents.at));
+}
+export async function markEventsNotified(ownerId: number, ids: number[], at: Date) {
+  if (!ids.length) return;
+  await db.update(attendanceEvents).set({ notifiedAt: at }).where(and(eq(attendanceEvents.ownerId, ownerId), sql`${attendanceEvents.id} IN (${sql.join(ids.map((i) => sql`${i}`), sql`, `)})`));
+}
+export async function listRecentEvents(ownerId: number, limit = 20): Promise<AttendanceEvent[]> {
+  return db.select().from(attendanceEvents).where(eq(attendanceEvents.ownerId, ownerId)).orderBy(desc(attendanceEvents.at)).limit(limit);
+}
+/** 期間に出勤した打刻（店全体、またはひとりのスタッフ） */
+export async function listTimeEntries(ownerId: number, from: Date, to: Date, staffId?: number): Promise<TimeEntry[]> {
+  const conds = [eq(timeEntries.ownerId, ownerId), gte(timeEntries.clockIn, from), lt(timeEntries.clockIn, to)];
+  if (staffId) conds.push(eq(timeEntries.staffId, staffId));
+  return db.select().from(timeEntries).where(and(...conds)).orderBy(asc(timeEntries.clockIn));
+}
+
+// ---------- 店舗グループ ----------
+
+export async function createShopGroup(values: typeof shopGroups.$inferInsert): Promise<ShopGroup> {
+  return (await db.insert(shopGroups).values(values).returning())[0];
+}
+export async function getShopGroup(id: number): Promise<ShopGroup | undefined> {
+  return (await db.select().from(shopGroups).where(eq(shopGroups.id, id)))[0];
+}
+export async function getShopGroupByCode(code: string): Promise<ShopGroup | undefined> {
+  return (await db.select().from(shopGroups).where(eq(shopGroups.joinCode, code)))[0];
+}
+export async function listGroupOwners(groupId: number): Promise<Owner[]> {
+  return db.select().from(owners).where(eq(owners.groupId, groupId)).orderBy(asc(owners.id));
+}
+
+// ---------- クーポン ----------
+
+export async function listCoupons(ownerId: number): Promise<Coupon[]> {
+  return db.select().from(coupons).where(eq(coupons.ownerId, ownerId)).orderBy(asc(coupons.id));
+}
+export async function getCouponByCode(ownerId: number, code: string): Promise<Coupon | undefined> {
+  return (await db.select().from(coupons).where(and(eq(coupons.ownerId, ownerId), eq(coupons.code, code))))[0];
+}
+export async function createCoupon(values: typeof coupons.$inferInsert): Promise<Coupon> {
+  return (await db.insert(coupons).values(values).returning())[0];
+}
+export async function updateCoupon(ownerId: number, id: number, patch: Partial<typeof coupons.$inferInsert>): Promise<Coupon | undefined> {
+  return (await db.update(coupons).set(patch).where(and(eq(coupons.ownerId, ownerId), eq(coupons.id, id))).returning())[0];
+}
+
 // ---------- 予約 ----------
 
 export type ReservationRow = Reservation & { customer: Customer };
@@ -112,10 +272,13 @@ export type ReservationRow = Reservation & { customer: Customer };
 export type ReservationView = {
   id: number; number: string; date: string; time: string; endTime: string; startAt: string; endAt: string;
   customerName: string; customerPhone: string; customerEmail: string | null;
-  menuId: number; menuName: string; menuNameJa: string; menuNameEn: string; minutes: number;
-  price: Money; amountReceived: Money; currency: string;
+  /** メニューなしの予約は menuId と price が null（料金は受け取ったときに決まる） */
+  menuId: number | null; menuName: string; menuNameJa: string; menuNameEn: string; minutes: number;
+  price: Money | null; amountReceived: Money; currency: string;
   status: string; source: string; paymentMethod: string; paymentStatus: string;
   paymentUrl: string | null; createdAt: string; cancelledAt: string | null;
+  couponCode: string | null; discount: Money | null;
+  staffId: number | null; staffName: string; nominated: boolean;
 };
 
 export function reservationView(r: ReservationRow, tz: string, lang: Language): ReservationView {
@@ -127,9 +290,11 @@ export function reservationView(r: ReservationRow, tz: string, lang: Language): 
     customerName: r.customer.name, customerPhone: r.customer.phone, customerEmail: r.customer.email,
     menuId: r.menuId, menuName: lang === "ja" ? r.menuNameJa || r.menuNameEn : r.menuNameEn || r.menuNameJa,
     menuNameJa: r.menuNameJa, menuNameEn: r.menuNameEn, minutes: r.minutes,
-    price: money(r.price, r.currency, lang), amountReceived: money(r.amountReceived, r.currency, lang), currency: r.currency,
+    price: r.menuId === null && r.paymentStatus === "onsite_pending" ? null : money(r.price, r.currency, lang), amountReceived: money(r.amountReceived, r.currency, lang), currency: r.currency,
     status: r.status, source: r.source, paymentMethod: r.paymentMethod, paymentStatus: r.paymentStatus,
     paymentUrl: r.paymentUrl, createdAt: r.createdAt.toISOString(), cancelledAt: r.cancelledAt?.toISOString() ?? null,
+    couponCode: r.couponCode, discount: r.discount ? money(r.discount, r.currency, lang) : null,
+    staffId: r.staffId, staffName: r.staffName, nominated: r.nominated,
   };
 }
 
@@ -197,6 +362,20 @@ export async function createReservation(values: Omit<InsertReservation, "number"
 export async function updateReservation(ownerId: number, id: number, patch: Partial<InsertReservation>): Promise<ReservationRow | undefined> {
   await db.update(reservations).set(patch).where(and(eq(reservations.ownerId, ownerId), eq(reservations.id, id)));
   return getReservation(ownerId, id);
+}
+
+/** ある時刻より後に、ネットから入った予約と、お客さんが取り消した予約・日時を変えた予約 */
+export async function listChangesSince(ownerId: number, since: Date): Promise<{ booked: ReservationRow[]; cancelled: ReservationRow[]; moved: ReservationRow[] }> {
+  const booked = await db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
+    .where(and(eq(reservations.ownerId, ownerId), eq(reservations.source, "web"), gte(reservations.createdAt, since), ne(reservations.status, "cancelled")))
+    .orderBy(asc(reservations.startAt));
+  const cancelled = await db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
+    .where(and(eq(reservations.ownerId, ownerId), eq(reservations.cancelledBy, "customer"), gte(reservations.cancelledAt, since)))
+    .orderBy(asc(reservations.startAt));
+  const moved = await db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
+    .where(and(eq(reservations.ownerId, ownerId), ne(reservations.status, "cancelled"), gte(reservations.changedByCustomerAt, since), lt(reservations.createdAt, since)))
+    .orderBy(asc(reservations.startAt));
+  return { booked: joinRows(booked), cancelled: joinRows(cancelled), moved: joinRows(moved) };
 }
 
 export async function getReservationByStripeSession(sessionId: string): Promise<Reservation | undefined> {

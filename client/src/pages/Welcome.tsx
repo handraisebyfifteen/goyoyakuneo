@@ -5,14 +5,14 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
 import { useAnnounce } from "@/hooks/useAnnounce";
 import { useAuth } from "@/hooks/useAuth";
-import { hasVoicePrefs } from "@/lib/speech";
+import { hasVoicePrefs, isTouchDevice } from "@/lib/speech";
 
 export default function Welcome() {
   const { t, speechLang } = useI18n();
   const { owner } = useAuth();
   const [, navigate] = useLocation();
-  // 初めて開いた人は、まず声の設定へ（声で進められる）
-  const firstRun = !hasVoicePrefs();
+  // 初めて開いた人は、まず声の設定へ（声で進められる）。スマホはアプリが声を出さないので案内しない
+  const firstRun = !hasVoicePrefs() && !isTouchDevice();
   useEffect(() => { if (firstRun) navigate("/voice?first=1", { replace: true }); }, [firstRun, navigate]);
   const needsGesture = useAnnounce(t("welcomeSpeech"), speechLang, !firstRun);
   return (

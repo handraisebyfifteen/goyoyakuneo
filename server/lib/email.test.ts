@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeConfirmation } from "../email";
+import { composeConfirmation, composeReminder } from "../email";
 import type { Owner } from "@shared/schema";
 import { DEFAULT_HOURS } from "@shared/schema";
 import type { ReservationRow } from "../storage";
@@ -10,13 +10,13 @@ const owner: Owner = {
   shopNameJa: "ひかり治療院", shopNameEn: "Hikari Massage", address: "東京都架空区1-2-3", phone: "03-0000-0000", info: "駐車場あり", businessType: "massage",
   country: "JP", currency: "JPY", timezone: "Asia/Tokyo", language: "ja", hours: DEFAULT_HOURS,
   bufferMinutes: 15, slotStepMinutes: 30, maxDaysAhead: 60, minHoursBefore: 2, freeCancelHoursBefore: 24,
-  allowCardPayment: true, slug: "hikari", onboardingDone: true, createdAt: new Date(),
+  allowCardPayment: true, slug: "hikari", onboardingDone: true, lastBriefedAt: null, calendarToken: null, reviewUrl: "", allowNomination: false, clockToleranceMinutes: 30, groupId: null, setupState: { done: [], skipped: [], asks: {} }, createdAt: new Date(),
 };
 const row: ReservationRow = {
   id: 1, ownerId: 1, number: "1234", customerId: 1, menuId: 1, menuNameJa: "60分コース", menuNameEn: "60 min", minutes: 60, price: 6000, currency: "JPY",
   startAt: new Date("2026-10-30T06:00:00Z"), endAt: new Date("2026-10-30T07:00:00Z"), status: "confirmed", source: "web", paymentMethod: "card", paymentStatus: "unpaid",
-  amountReceived: 0, stripeSessionId: null, stripePaymentIntentId: null, paymentUrl: "https://example.com/pay/1", createdAt: new Date(), cancelledAt: null,
-  customer: { id: 1, ownerId: 1, name: "田中", phone: "09000000000", email: "delivered@resend.dev", createdAt: new Date() },
+  amountReceived: 0, stripeSessionId: null, stripePaymentIntentId: null, paymentUrl: "https://example.com/pay/1", createdAt: new Date(), cancelledAt: null, cancelledBy: null, remindedAt: null, changedByCustomerAt: null, thankedAt: null, couponCode: null, discount: 0, staffId: null, staffName: "", nominated: false,
+  customer: { id: 1, ownerId: 1, name: "田中", phone: "09000000000", email: "delivered@resend.dev", notes: "", createdAt: new Date() },
 };
 
 test("確認メールは店名・日時・所要時間・メニュー・料金・支払い方法・リンク・住所・電話・案内・キャンセルの決まりを含む（日本語）", () => {
@@ -32,4 +32,16 @@ test("確認メールはオーナーの言語設定で英語になる", () => {
   assert.ok(subject.startsWith("[Hikari Massage]"));
   assert.ok(text.includes("Dear 田中,") && text.includes("(Friday)") && text.includes("Pay at the shop") && text.includes("24 hours"));
   assert.ok(!text.includes("Pay here"));
+});
+
+test("メニューなしの予約の確認メールには、メニューと料金の行が出ない", () => {
+  const { text } = composeConfirmation(owner, { ...row, menuId: null, menuNameJa: "", menuNameEn: "", price: 0, paymentMethod: "onsite", paymentStatus: "onsite_pending", paymentUrl: null });
+  assert.ok(text.includes("60分") && !text.includes("メニュー:") && !text.includes("料金:"), text);
+});
+
+test("前日のお知らせは件名と書き出しが変わり、取り消しの案内が入る", () => {
+  const { subject, text } = composeReminder(owner, row);
+  assert.ok(subject.includes("明日のご予約のお知らせ") && subject.includes("2026-10-30 15:00"));
+  assert.ok(text.includes("明日のご予約のお知らせです") && text.includes("取り消しができます") && text.includes("予約番号: 1234"), text);
+  assert.ok(composeReminder({ ...owner, language: "en" }, row).subject.includes("Reminder"));
 });

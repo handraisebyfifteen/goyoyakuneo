@@ -6,12 +6,16 @@ import { ApiError, sendError } from "./errors";
 import { settingsPatchSchema, type Owner, type Language } from "@shared/schema";
 import { cancelPolicyText, normalizeLang } from "@shared/i18n";
 import { money, toMinor } from "@shared/money";
-import { availableSlots } from "./lib/booking";
+import { availableSlots, refundEligible } from "./lib/booking";
 import { isValidTimeZone, nowLocal, fromLocal, isValidDate, monthRange, addDays } from "./lib/time";
-import { bookingSettings, busyAround, createReservationFor, cancelReservationFor, todayFor, salesSummaryFor, addBlockedSlotFor } from "./services";
+import { bookingSettings, busyAround, slotsFor, createReservationFor, cancelReservationFor, updateReservationFor, couponDiscount, todayFor, salesSummaryFor, addBlockedSlotFor } from "./services";
 import { registerVoiceRoutes } from "./ai/routes";
 import { confirmSession, stripeConfigured } from "./payments";
-import { emailConfigured } from "./email";
+import { emailConfigured, sendBookingConfirmation } from "./email";
+import { calendarFeed, calendarTokenFor } from "./calendar";
+import { registerStaffRoutes } from "./staff";
+import { registerGroupRoutes } from "./groups";
+import { registerAttendanceRoutes } from "./attendance";
 
 type Handler = (req: Request, res: Response, lang: Language) => Promise<void>;
 
@@ -129,12 +133,14 @@ export function registerRoutes(app: Express) {
     const owner = ownerOf(req);
     const b = z.object({
       menuId: z.number().int().optional(), menuName: z.string().optional(),
-      date: z.string(), time: z.string(), customerName: z.string(),
+      date: z.string(), time: z.string(), endTime: z.string().optional(), customerName: z.string(),
       customerPhone: z.string().optional(), customerEmail: z.string().optional(),
-      paymentMethod: z.enum(["card", "onsite"]),
+      paymentMethod: z.enum(["card", "onsite"]).default("onsite"),
     }).parse(req.body);
+    // メニューは任意（終わりの時刻だけでも入れられる）。指定されたのに見つからないときは止める
+    const wanted = b.menuId !== undefined || !!b.menuName;
     const menu = b.menuId ? await storage.getMenu(owner.id, b.menuId) : b.menuName ? await storage.findMenuByName(owner.id, b.menuName) : undefined;
-    if (!menu) throw new ApiError("menu_not_found", 404);
+    if (wanted && !menu) throw new ApiError("menu_not_found", 404);
     const result = await createReservationFor(owner, { ...b, menu, source: "owner", lang });
     res.status(201).json({ ok: true, ...result });
   }));
@@ -146,14 +152,19 @@ export function registerRoutes(app: Express) {
     res.json({ ok: true, ...(await cancelReservationFor(owner, row, lang)) });
   }));
 
+  // カレンダー購読用の URL（Google・iPhone・Outlook に予約を映す。一方通行）
+  app.get("/api/owner/calendar-link", requireOwner, wrap(async (req, res) => {
+    const token = await calendarTokenFor(ownerOf(req));
+    res.json({ ok: true, path: `/api/public/calendar/${token}.ics` });
+  }));
+
   app.get("/api/owner/slots", requireOwner, wrap(async (req, res) => {
     const owner = ownerOf(req);
     const q = req.query as Record<string, string | undefined>;
     const menu = q.menuId ? await storage.getMenu(owner.id, Number(q.menuId)) : undefined;
     if (!menu) throw new ApiError("menu_not_found", 404);
     const date = q.date ?? todayFor(owner);
-    const busy = await busyAround(owner, date);
-    res.json({ ok: true, date, ...availableSlots({ settings: bookingSettings(owner), date, minutes: menu.minutes, ...busy, source: "owner" }) });
+    res.json({ ok: true, date, ...(await slotsFor(owner, { date, minutes: menu.minutes, menuId: menu.id, source: "owner", staffId: q.staffId ? Number(q.staffId) : undefined })) });
   }));
 
   // ---------- オーナー：売り上げ ----------
@@ -209,9 +220,13 @@ export function registerRoutes(app: Express) {
         timezone: owner.timezone, hours: owner.hours, allowCardPayment: owner.allowCardPayment,
         maxDaysAhead: owner.maxDaysAhead, minHoursBefore: owner.minHoursBefore,
         cancelPolicy: cancelPolicyText(owner.freeCancelHoursBefore, lang), freeCancelHoursBefore: owner.freeCancelHoursBefore,
-        today, lastDate: addDays(today, owner.maxDaysAhead),
+        today, lastDate: addDays(today, owner.maxDaysAhead), allowNomination: owner.allowNomination,
       },
       menus: menusList.map((m) => storage.menuView(m, lang)),
+      // 指名を受け付ける店なら、指名できるスタッフ（名前と、受けられるコース）
+      staff: owner.allowNomination
+        ? (await storage.listStaff(owner.id)).filter((s) => s.active && s.treats && s.acceptNominated).map((s) => ({ id: s.id, name: s.name, menuIds: s.menuIds }))
+        : [],
     });
   }));
 
@@ -221,9 +236,19 @@ export function registerRoutes(app: Express) {
     const menu = q.menuId ? await storage.getMenu(owner.id, Number(q.menuId)) : undefined;
     if (!menu || !menu.active) throw new ApiError("menu_not_found", 404);
     const date = q.date ?? "";
-    if (!isValidDate(date)) throw new ApiError("invalid_date");
-    const busy = await busyAround(owner, date);
-    res.json({ ok: true, date, ...availableSlots({ settings: bookingSettings(owner), date, minutes: menu.minutes, ...busy, source: "web" }) });
+    const staffId = owner.allowNomination && q.staffId ? Number(q.staffId) : undefined;
+    res.json({ ok: true, date, ...(await slotsFor(owner, { date, minutes: menu.minutes, menuId: menu.id, source: "web", staffId })) });
+  }));
+
+  // 予約の前に、クーポンで料金がいくらになるかを見る
+  app.get("/api/public/shop/:slug/coupon", wrap(async (req, res, lang) => {
+    const owner = await shopBySlug(req.params.slug);
+    const q = req.query as Record<string, string | undefined>;
+    const menu = q.menuId ? await storage.getMenu(owner.id, Number(q.menuId)) : undefined;
+    if (!menu || !menu.active) throw new ApiError("menu_not_found", 404);
+    const c = await couponDiscount(owner, q.code ?? "", menu);
+    if (!c) throw new ApiError("coupon_invalid");
+    res.json({ ok: true, code: c.code, discount: money(c.discount, menu.currency, lang), price: money(menu.price - c.discount, menu.currency, lang) });
   }));
 
   app.post("/api/public/shop/:slug/reservations", wrap(async (req, res, lang) => {
@@ -231,13 +256,14 @@ export function registerRoutes(app: Express) {
     const b = z.object({
       menuId: z.number().int(), date: z.string(), time: z.string(),
       name: z.string().min(1).max(100), phone: z.string().min(1).max(40), email: z.string().max(200).optional(),
-      paymentMethod: z.enum(["card", "onsite"]),
+      paymentMethod: z.enum(["card", "onsite"]), couponCode: z.string().max(40).optional(), staffId: z.number().int().optional(),
     }).parse(req.body);
     const menu = await storage.getMenu(owner.id, b.menuId);
     if (!menu || !menu.active) throw new ApiError("menu_not_found", 404);
     const result = await createReservationFor(owner, {
       menu, date: b.date, time: b.time, customerName: b.name, customerPhone: b.phone, customerEmail: b.email,
-      paymentMethod: b.paymentMethod, source: "web", lang,
+      paymentMethod: b.paymentMethod, source: "web", lang, couponCode: b.couponCode,
+      staffId: owner.allowNomination ? b.staffId : undefined,
     });
     res.status(201).json({ ok: true, ...result, shopName: storage.shopName(owner, lang) });
   }));
@@ -263,6 +289,13 @@ export function registerRoutes(app: Express) {
     res.json({ ok: true, paid: r.paid, reservation: storage.reservationView(row, owner.timezone, lang), shopName: storage.shopName(owner, lang) });
   }));
 
+  app.get("/api/public/calendar/:token.ics", wrap(async (req, res) => {
+    const owner = /^[A-Za-z0-9_-]{20,}$/.test(req.params.token) ? await storage.getOwnerByCalendarToken(req.params.token) : undefined;
+    if (!owner) throw new ApiError("not_found", 404);
+    res.type("text/calendar; charset=utf-8").setHeader("Cache-Control", "no-store");
+    res.send(await calendarFeed(owner));
+  }));
+
   app.get("/api/public/config", (_req, res) => {
     res.json({ ok: true, stripe: stripeConfigured(), email: emailConfigured() });
   });
@@ -273,17 +306,51 @@ export function registerRoutes(app: Express) {
       ok: true,
       reservation: storage.reservationView(row, row.owner.timezone, lang),
       shop: { name: storage.shopName(row.owner, lang), slug: row.owner.slug, address: row.owner.address, phone: row.owner.phone,
-        cancelPolicy: cancelPolicyText(row.owner.freeCancelHoursBefore, lang) },
+        cancelPolicy: cancelPolicyText(row.owner.freeCancelHoursBefore, lang),
+        today: todayFor(row.owner), maxDaysAhead: row.owner.maxDaysAhead, freeCancelHours: row.owner.freeCancelHoursBefore, canReschedule: reschedulable(row) },
     });
+  }));
+
+  // ---------- お客さん：日時の変更（無料で取り消せる期限までなら、自分で変えられる） ----------
+
+  function reschedulable(row: storage.ReservationRow & { owner: Owner }): boolean {
+    return row.status === "confirmed" && refundEligible(row.startAt, row.owner.freeCancelHoursBefore);
+  }
+  function assertReschedulable(row: storage.ReservationRow & { owner: Owner }) {
+    if (row.status !== "confirmed") throw new ApiError("not_confirmed");
+    if (!reschedulable(row)) throw new ApiError("reschedule_too_late", 400, { hours: row.owner.freeCancelHoursBefore });
+  }
+
+  app.post("/api/public/lookup/slots", wrap(async (req, res) => {
+    const b = lookupBody.extend({ date: z.string() }).parse(req.body);
+    const row = await lookup(b);
+    assertReschedulable(row);
+    // 自分の予約は空きを邪魔しないので外す。指名の予約なら、その人の空きだけ
+    const staffId = row.nominated && row.staffId !== null ? row.staffId : undefined;
+    res.json({ ok: true, date: b.date, ...(await slotsFor(row.owner, { date: b.date, minutes: row.minutes, menuId: row.menuId, source: "web", staffId, ignoreId: row.id })) });
+  }));
+
+  app.post("/api/public/lookup/reschedule", wrap(async (req, res, lang) => {
+    const b = lookupBody.extend({ date: z.string(), time: z.string() }).parse(req.body);
+    const row = await lookup(b);
+    assertReschedulable(row);
+    const r = await updateReservationFor(row.owner, row, { date: b.date, time: b.time, lang, source: "web" });
+    const updated = await storage.updateReservation(row.owner.id, row.id, { changedByCustomerAt: new Date() });
+    // 新しい日時の確認メールを送る（失敗しても変更は残す）
+    if (updated) await sendBookingConfirmation(row.owner, updated).catch((e) => console.error("[email]", e));
+    res.json({ ok: true, reservation: updated ? storage.reservationView(updated, row.owner.timezone, lang) : r.reservation });
   }));
 
   app.post("/api/public/lookup/cancel", wrap(async (req, res, lang) => {
     const row = await lookup(lookupBody.parse(req.body));
-    const result = await cancelReservationFor(row.owner, row, lang);
+    const result = await cancelReservationFor(row.owner, row, lang, "customer");
     res.json({ ok: true, ...result });
   }));
 
   registerVoiceRoutes(app);
+  registerStaffRoutes(app);
+  registerGroupRoutes(app);
+  registerAttendanceRoutes(app);
 
   app.use("/api", (_req, res) => {
     res.status(404).json({ ok: false, code: "not_found" });

@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { VoiceConversation, type Step, type IntroPart } from "@/components/VoiceConversation";
 import { useI18n } from "@/lib/i18n";
-import { getVoicePrefs, setVoicePrefs, loadVoices, voicesFor, guessGender, previewVoice, speak, ttsSupported, type VoiceLang, type VoicePref, type VoicePrefs, type Gender, type Rate } from "@/lib/speech";
+import { getVoicePrefs, setVoicePrefs, loadVoices, voicesFor, guessGender, previewVoice, speak, ttsSupported, voiceConversationUsable, type VoiceLang, type VoicePref, type VoicePrefs, type Gender, type Rate } from "@/lib/speech";
 
 const selectClass = "flex min-h-12 w-full rounded-md border-2 border-input bg-card px-3 py-2 text-base";
 
@@ -22,7 +22,7 @@ export default function VoiceSettings() {
   const [prefs, setPrefs] = useState<VoicePrefs>(getVoicePrefs);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [savedMsg, setSavedMsg] = useState("");
-  const [mode, setMode] = useState<"voice" | "form">("voice");
+  const [mode, setMode] = useState<"voice" | "form">(() => (voiceConversationUsable() ? "voice" : "form"));
   const current: VoiceLang = lang;
 
   useEffect(() => {

@@ -15,7 +15,10 @@ export type ErrorCode =
   | "currency_locked" | "invalid_timezone" | "card_not_allowed" | "email_in_use" | "slug_in_use"
   | "login_failed" | "passphrase_short" | "passphrase_wrong" | "unauthorized" | "validation"
   | "not_found" | "server_error" | "paid_menu_locked" | "not_onsite_pending" | "not_card_unpaid"
-  | "unknown_tool" | "owner_declined" | "passphrase_locked" | "passphrase_missing" | "passphrase_rejected" | "ai_unavailable" | "blocked_slot_not_found" | "cash_unreadable" | "cash_not_found";
+  | "unknown_tool" | "owner_declined" | "passphrase_locked" | "passphrase_missing" | "passphrase_rejected" | "ai_unavailable" | "blocked_slot_not_found" | "cash_unreadable" | "cash_not_found"
+  | "end_or_menu_required" | "card_needs_menu" | "customer_not_found" | "no_show_too_early" | "not_confirmed" | "reschedule_too_late"
+  | "coupon_invalid" | "coupon_expired" | "coupon_exists" | "coupon_needs_menu"
+  | "staff_not_found" | "staff_cannot_take" | "no_staff_for_menu" | "no_staff_available" | "staff_email_in_use" | "invite_invalid" | "forbidden" | "group_not_found" | "already_in_group";
 
 type P = Record<string, string | number>;
 const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
@@ -48,6 +51,25 @@ const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
     not_found: () => "見つかりません",
     server_error: () => "保存に失敗しました",
     paid_menu_locked: () => "支払い済みの予約は、料金の違うメニューに変更できません",
+    end_or_menu_required: () => "終わりの時刻か、メニューを教えてください",
+    customer_not_found: () => "そのお客さんは見つかりません",
+    coupon_invalid: () => "そのクーポンは使えません",
+    staff_not_found: () => "そのスタッフは見つかりません",
+    staff_cannot_take: () => "そのスタッフは、この予約を受けられない設定です（指名を受けない、またはこのコースを担当しない）",
+    no_staff_for_menu: () => "このコースを受けられるスタッフがいません",
+    no_staff_available: () => "その時間は、受けられるスタッフが全員ふさがっています",
+    staff_email_in_use: () => "そのメールアドレスはすでに使われています",
+    invite_invalid: () => "招待のリンクが正しくないか、期限が切れています。お店の方にもう一度送ってもらってください",
+    forbidden: () => "この操作をする権限がありません",
+    group_not_found: () => "その参加コードのグループは見つかりません",
+    already_in_group: () => "すでにグループに入っています。先にグループを抜けてください",
+    coupon_expired: () => "そのクーポンは期限が切れています",
+    coupon_exists: (p) => `「${p.code}」というクーポンはすでにあります`,
+    coupon_needs_menu: () => "クーポンはメニューのある予約にだけ使えます",
+    reschedule_too_late: (p) => `日時の変更は、ご予約の${p.hours}時間前までです。お店に直接ご連絡ください`,
+    no_show_too_early: () => "まだ予約の時間になっていないため、無断キャンセルにはできません",
+    not_confirmed: () => "この予約はすでに取り消し済みか、記録済みです",
+    card_needs_menu: () => "メニューのない予約は料金が決まっていないため、カード前払いにはできません。当日払いにしてください",
     not_onsite_pending: () => "この予約は現地払い待ちの状態ではありません",
     not_card_unpaid: () => "この予約はカード払いの未払いの状態ではありません",
     unknown_tool: (p) => `${p.name} という操作はありません`,
@@ -89,6 +111,25 @@ const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
     not_found: () => "Not found.",
     server_error: () => "Saving failed.",
     paid_menu_locked: () => "A paid booking cannot be changed to a menu with a different price.",
+    end_or_menu_required: () => "Please give an end time or a menu.",
+    customer_not_found: () => "That customer was not found.",
+    coupon_invalid: () => "That coupon cannot be used.",
+    staff_not_found: () => "That staff member was not found.",
+    staff_cannot_take: () => "That staff member is set not to take this booking (no nominations, or not this service).",
+    no_staff_for_menu: () => "No staff member can take this service.",
+    no_staff_available: () => "Every staff member who can take this is busy at that time.",
+    staff_email_in_use: () => "That email address is already in use.",
+    invite_invalid: () => "This invitation link is not valid or has expired. Please ask the shop to send a new one.",
+    forbidden: () => "You do not have permission to do this.",
+    group_not_found: () => "No group was found with that code.",
+    already_in_group: () => "This shop is already in a group. Leave it first.",
+    coupon_expired: () => "That coupon has expired.",
+    coupon_exists: (p) => `A coupon called "${p.code}" already exists.`,
+    coupon_needs_menu: () => "Coupons only apply to bookings with a menu.",
+    reschedule_too_late: (p) => `Bookings can be changed up to ${p.hours} hours before. Please contact the shop directly.`,
+    no_show_too_early: () => "The booking time has not come yet, so it cannot be marked as a no-show.",
+    not_confirmed: () => "This booking is already cancelled or closed.",
+    card_needs_menu: () => "A booking without a menu has no set price, so it cannot be prepaid by card. Please use pay at the shop.",
     not_onsite_pending: () => "This booking is not waiting for on-site payment.",
     not_card_unpaid: () => "This booking is not an unpaid card booking.",
     unknown_tool: (p) => `There is no action called ${p.name}.`,

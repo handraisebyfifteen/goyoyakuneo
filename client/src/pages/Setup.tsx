@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { useI18n, type Lang } from "@/lib/i18n";
 import { apiRequest, ApiRequestError, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/useAuth";
-import { speak } from "@/lib/speech";
+import { speak, voiceConversationUsable } from "@/lib/speech";
 import type { BusinessHours, PublicOwner, WeekdayKey } from "@shared/schema";
 
 type Preset = { country: string; currency: string; timezone: string; label: { ja: string; en: string }; aliases: string[] };
@@ -43,7 +43,7 @@ export default function Setup() {
   const { t, lang, setLang } = useI18n();
   const [, navigate] = useLocation();
   const { owner, isLoading } = useAuth();
-  const [mode, setMode] = useState<"voice" | "form">("voice");
+  const [mode, setMode] = useState<"voice" | "form">(() => (voiceConversationUsable() ? "voice" : "form"));
   const [section, setSection] = useState<SectionKey>("region");
   const [menuCount, setMenuCount] = useState(0);
   const [menuRound, setMenuRound] = useState(0);
@@ -69,9 +69,8 @@ export default function Setup() {
         await patch(body);
         setLang(body.language as Lang);
       } else if (section === "shop") {
-        await patch(lang === "ja"
-          ? { shopNameJa: v.shopName, address: v.address, phone: v.phone, info: v.info }
-          : { shopNameEn: v.shopName, address: v.address, phone: v.phone, info: v.info });
+        const name = v.shopName ? (lang === "ja" ? { shopNameJa: v.shopName } : { shopNameEn: v.shopName }) : {};
+        await patch({ ...name, address: v.address, phone: v.phone, info: v.info });
       } else if (section === "hours") {
         const closed = parseClosedDays(v.closedDays);
         const hours = {} as BusinessHours;
@@ -139,8 +138,9 @@ function buildSections(owner: PublicOwner, lang: Lang, t: (k: string, p?: Record
       { key: "currency", prompt: t("askCurrency"), label: t("currency"), type: "choice", defaultValue: owner.currency, choices: CURRENCIES.map((c) => ({ value: c, label: c, aliases: [c.toLowerCase(), ...(c === "JPY" ? ["円", "えん", "yen"] : c === "USD" ? ["ドル", "dollar"] : c === "EUR" ? ["ユーロ", "euro"] : c === "GBP" ? ["ポンド", "pound"] : [])] })) },
       { key: "timezone", prompt: t("askTimezone"), label: t("timezone"), type: "choice", defaultValue: owner.timezone, choices: TIMEZONES.map((z) => ({ value: z, label: z, aliases: [z.split("/")[1].replace("_", " ").toLowerCase(), ...(z === "Asia/Tokyo" ? ["東京", "日本"] : [])] })) },
     ] },
+    // 店名は登録のときに聞いている。今の言語での店名がまだ無いときだけ聞く
     shop: { title: "stepShop", steps: [
-      { key: "shopName", prompt: t("askShopName"), label: t("shopName"), type: "text", defaultValue: (ja ? owner.shopNameJa : owner.shopNameEn) || undefined },
+      ...((ja ? owner.shopNameJa : owner.shopNameEn) ? [] : [{ key: "shopName", prompt: t("askShopName"), label: t("shopName"), type: "text" } as Step]),
       { key: "address", prompt: t("askAddress"), label: t("address"), type: "text", optional: true, defaultValue: owner.address || undefined },
       { key: "phone", prompt: t("askPhone"), label: t("phone"), type: "phone", optional: true, defaultValue: owner.phone || undefined },
       { key: "info", prompt: t("askInfo"), label: t("info"), type: "text", optional: true, defaultValue: owner.info || undefined },

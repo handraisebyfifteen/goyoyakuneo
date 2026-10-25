@@ -22,7 +22,8 @@ export type BookingSettings = {
   minHoursBefore: number;
 };
 
-export type Busy = { id: number; startAt: Date; endAt: Date; label: string };
+/** 重なりの判定に使う枠。staffId はスタッフのいる店で、その枠が誰のものか（null ならお店全体） */
+export type Busy = { id: number; startAt: Date; endAt: Date; label: string; staffId?: number | null };
 
 export type CheckInput = {
   settings: BookingSettings;

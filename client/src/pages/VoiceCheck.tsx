@@ -7,7 +7,7 @@ import { Link } from "wouter";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
-import { getVoicePrefs, loadVoices, pickVoice, speak, sttSupported, ttsSupported, unlockSpeech, userActivated, voicesFor } from "@/lib/speech";
+import { getVoicePrefs, isTouchDevice, loadVoices, pickVoice, speak, sttSupported, ttsSupported, unlockSpeech, userActivated, voicesFor } from "@/lib/speech";
 
 export default function VoiceCheck() {
   const { t } = useI18n();
@@ -66,6 +66,7 @@ export default function VoiceCheck() {
     ["音声認識（SpeechRecognition）", sttSupported() ? "あり" : "なし"],
     ["ページ内を操作済み（音を出せる状態）", userActivated() ? "はい" : "いいえ（まだ何も押していません）"],
     ["埋め込み枠の中か", window.self !== window.top ? "はい（Replit のプレビュー枠など。別タブで開いてください）" : "いいえ"],
+    ["スマホ・タブレットとして判定", isTouchDevice() ? "はい（アプリは声を出しません。VoiceOver などに任せます）" : "いいえ"],
     ["読み上げを止める設定", prefs.mute ? "オン（鳴りません。声の設定で切ってください）" : "オフ"],
     ["端末の声の数", `全体 ${voices.length} / 日本語 ${ja.length} / 英語 ${en.length}`],
     ["日本語で使う声", chosenJa ? `${chosenJa.name} (${chosenJa.lang})` : "なし"],

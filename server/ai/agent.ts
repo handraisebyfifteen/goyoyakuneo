@@ -20,6 +20,7 @@ import {
   TOOL_SPECS, READ_TOOLS, WRITE_TOOLS, GUARDED_TOOLS, ADVISOR_TOOL, ToolContext, executeTool, describeAction, validateToolArgs, clockFor, type ToolResult,
 } from "./tools";
 import * as storage from "../storage";
+import { pendingSetupItems, setupReply } from "./setup";
 import { verifyPassphrase } from "../lib/passphrase";
 import { WEEKDAY_LABELS } from "@shared/i18n";
 import { WEEKDAY_KEYS } from "@shared/schema";
@@ -125,6 +126,14 @@ export class Agent {
       // 確認待ちのまま別の話をされた／合言葉待ちに普通の発話が来た → 取り消し扱い（発話は合言葉として扱わない）
       this.pending.delete(owner.id);
       note = T[lang].declinedNote;
+    } else {
+      // 設定の質問への「聞かないで」「このままでいい」「あとで」は、AI に任せずに受ける
+      const r = await setupReply(owner, text, lang);
+      if (r) {
+        await this.deps.history.save(owner.id, "user", text);
+        await this.deps.history.save(owner.id, "assistant", r.reply, MODELS.fast);
+        return { type: "reply", text: r.reply, model: "daily", changed: false, actions: [] };
+      }
     }
     const history = await this.deps.history.load(owner.id);
     const messages: ChatMsg[] = [{ role: "system", content: await this.systemPrompt(ctx) }, ...history];
@@ -325,15 +334,15 @@ export class Agent {
     try {
       const res = await this.deps.chat("smart", [
         { role: "system", content: lang === "ja"
-          ? "目の不自由なマッサージ師に読み上げる確認文を、日本語で一文だけ書いてください。「〜でよろしいでしょうか」で終えてください。日付・時刻・金額の数字はそのまま算用数字で書く（漢数字にしない）。予約番号や id のような記号は入れない。まだ実行していないので「承りました」とは言わない。説明や前置きは不要。文だけを返す。"
-          : "Write exactly one short sentence in English, to be read aloud to a blind massage therapist, asking them to confirm the action below. End with a question. Do not include booking numbers or codes. Do not say it is done. Return only the sentence." },
+          ? "目の不自由なマッサージ師に読み上げる確認文を、日本語で一文だけ書いてください。「〜でよろしいでしょうか」で終えてください。日付・時刻・金額の数字はそのまま算用数字で書く（漢数字にしない）。予約番号や id のような記号は入れない。まだ実行していないので「承りました」とは言わない。操作に書かれていないこと（メニューなど）を足したり、別のことを尋ねたりしない。説明や前置きは不要。文だけを返す。"
+          : "Write exactly one short sentence in English, to be read aloud to a blind massage therapist, asking them to confirm the action below. End with a question. Do not include booking numbers or codes. Do not say it is done. Do not add anything not in the action (such as a menu) or ask about anything else. Return only the sentence." },
         { role: "user", content: lang === "ja" ? "操作: 10月30日（金曜日）11時に、山田さん、30分コース（¥3,500）、当日払いで予約を入れる" : "Action: book Yamada for 30 min (¥3,500) on Friday, October 30 at 11:00, paying at the shop" },
         { role: "assistant", content: lang === "ja" ? "10月30日金曜日の11時に、山田さんの30分コース、3,500円を当日払いでご予約でよろしいでしょうか。" : "Shall I book Yamada for the 30 minute course at 3,500 yen on Friday, October 30 at 11:00, paying at the shop?" },
         { role: "user", content: (lang === "ja" ? "操作: " : "Action: ") + summary },
       ]);
       const text = speakable(res.content).split("\n")[0].trim();
-      // 疑問形で終わっていない（「記録しました」など完了形）なら使わない
-      const asksConfirmation = lang === "ja" ? /(でしょうか|ですか|ますか)[。？?]?$/.test(text) : /\?$/.test(text);
+      // 「はい／いいえ」で答えられる確認で終わっていない（完了形や、別のことを尋ねる文）なら使わない
+      const asksConfirmation = lang === "ja" ? /(よろしいでしょうか|よろしいですか)[。？?]?$/.test(text) : /\?$/.test(text);
       if (text && text.length < 300 && asksConfirmation) return text;
     } catch (e) {
       console.error("[llm_error:confirm]", e);
@@ -349,6 +358,13 @@ export class Agent {
     const c = clockFor(o);
     const weekday = WEEKDAY_LABELS[lang][WEEKDAY_KEYS.indexOf(c.weekday)];
     const shop = storage.shopName(o, lang) || (lang === "ja" ? "（店名は未登録）" : "(shop name not set)");
+    const SETUP_LABELS: Record<string, [string, string]> = { hours: ["営業時間と定休日", "opening hours and closing days"], menu: ["メニュー", "menu"], contact: ["住所と電話番号", "address and phone"], info: ["お客さんへの案内", "notes for customers"], rules: ["受付ルール", "booking rules"], cancel: ["キャンセルの決まり", "cancellation policy"] };
+    const pendingSetup = (await pendingSetupItems(o)).map((k) => SETUP_LABELS[k][lang === "ja" ? 0 : 1]).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "なし" : "none");
+    const team = (await storage.listStaff(o.id)).filter((s) => s.active).map((s) => s.name).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "なし（オーナーひとり）" : "none (owner only)");
+    const unconfirmed = (await storage.listUnconfirmedEntries(o.id)).filter((e) => e.clockOut);
+    const attendance = lang === "ja"
+      ? `${unconfirmed.length}件（うち要確認${unconfirmed.filter((e) => e.flags.length).length}件）`
+      : `${unconfirmed.length} (${unconfirmed.filter((e) => e.flags.length).length} need a check)`;
     const menus = (await storage.listMenus(o.id, true)).map((m) => { const v = storage.menuView(m, lang); return `${v.name} ${v.minutes}${lang === "ja" ? "分" : " min"} ${v.price.display}`; }).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "まだありません" : "none yet");
     if (lang === "ja") {
       return `あなたは「ご予約ちゃん」です。目の不自由なマッサージ師の方の右腕として、予約と売り上げの管理を声で手伝います。
@@ -356,12 +372,20 @@ export class Agent {
 現在は ${c.date} ${c.time}（${weekday}）、時間帯は ${o.timezone} です。今日は ${c.date}、明日は ${c.tomorrow}、今月は ${c.month.from} から ${c.month.to} までです。「明日」「来週の木曜」などはこの日付から計算してください。
 国は ${o.country}、通貨は ${o.currency}、話す言語は日本語です。
 メニュー: ${menus}
+まだ決まっていない設定: ${pendingSetup}
+スタッフ: ${team}
+確認待ちの打刻: ${attendance}
 
 守ること:
 - 返事はすべて読み上げられます。短く、丁寧に、日本語で。記号・表・箇条書き・絵文字・マークダウンは使わない。
 - 予約番号や id などの英数字は読み上げない。お客さんの名前と日時で話す。
 - 金額はツールの結果にある display の形で読み上げる。
 - 予約や金額は、必ずツールで調べてから答える。推測で答えない。覚えている内容ではなく、毎回ツールの結果で答える。
+- 「打刻を確認して」と言われたら confirm_attendance（予定どおりのものだけ）。要確認のものは get_attendance で理由を伝え、直すなら correct_attendance、そのまま認めるなら only_ok=false で確認する。
+- スタッフのいる店では、担当や指名を言われたときだけ staff_name を渡す。言われなければ省く（受けられる人に自動で割り当てる）。
+- 予約はメニューがなくても入れられる。「田中さん、5日の2時から3時半」なら end_time を使う。メニューがないことを理由に断ったり、メニューを作るよう求めたりしない。
+- お客さんのことを聞かれたら get_customer で調べる。「腰が悪い」「強めが好き」のような話が出たら、update_customer でメモに残すか一言たずねる。
+- 予約の時間を過ぎても来なかったと言われたら、mark_no_show で無断キャンセルとして記録する。
 - 予約を取り消す・変える・支払いを記録するときは、まず find_reservations_by_customer や get_today_reservations で予約の id を調べてからツールを呼ぶ。
 - ツールの結果が ok: true のときだけ「承りました」と言う。失敗したら error の理由をそのまま短く伝える。
 - 本人が取り消した操作は、実行されていないと伝える。
@@ -372,6 +396,11 @@ export class Agent {
 - check_cash の読み取りは参考です。手触りでも確かめていただくよう必ず添える。記録は record_onsite_payment で別に行う（履歴に読み取り結果があれば、その合計を amount に使う）。
 - 「なぜ」「どうしたら」「相談したい」、悩みや愚痴のときは ask_advisor を呼ぶ。
 - 履歴に確認待ちの質問が残っていても、本人が改めて頼まない限り、その操作を勝手に再開しない。
+- 設定の質問は、管理画面を開いたときにシステムが1日に1つだけ聞く。あなたから設定の話を持ち出さない（本人に聞かれたときは答える）。
+- 直前にシステムが設定のことを聞いていて本人が答えたら、その内容で設定のツールを呼ぶ。「このままでいい」なら set_setup_item で done、「聞かないで」なら skip。「あとで」なら何も呼ばずに「わかりました」と答える。
+- 「設定の話はもういい」「設定のことは聞かないで」と言われたら、いつでも set_setup_item を item=all, status=skip で呼ぶ。呼ばずに「やめます」と言わない。
+- メニューの名前を言われなければ「60分コース」のように所要時間から名前をつける。
+- ツールの結果に suggestion があれば、結果を伝えたあとに一度だけそのまま伝える。
 - 性格はオーナーの右腕。愚痴や悩みにはまず共感する。踏み込みすぎない。`;
     }
     return `You are "GoYoyaku-chan", the right hand of a blind massage therapist. You manage their bookings and sales by voice.
@@ -379,12 +408,20 @@ Shop: ${shop}
 It is now ${c.date} ${c.time} (${weekday}) in the ${o.timezone} time zone. Today is ${c.date}, tomorrow is ${c.tomorrow}, this month runs ${c.month.from} to ${c.month.to}. Compute "tomorrow", "next Thursday" and so on from these dates.
 Country ${o.country}, currency ${o.currency}, language English.
 Menus: ${menus}
+Settings not decided yet: ${pendingSetup}
+Staff: ${team}
+Clock records waiting for confirmation: ${attendance}
 
 Rules:
 - Everything you say is read aloud. Be short and polite, in English. No symbols, tables, bullet points, emoji or markdown.
 - Never read out booking numbers or ids. Refer to bookings by the customer's name and the date and time.
 - Read amounts exactly as the "display" field in tool results.
 - Always look bookings and amounts up with tools before answering. Never guess or answer from memory.
+- "Confirm the clock records" means confirm_attendance (on-plan ones only). For ones needing a check, explain the reason from get_attendance, then correct_attendance to fix the time, or confirm_attendance with only_ok=false to accept them.
+- In shops with staff, pass staff_name only when the owner names who should take it. Otherwise leave it out and the system assigns someone who can.
+- A booking does not need a menu. For "Tanaka, the 5th from 2 to 3:30", use end_time. Never refuse a booking or demand a menu because none exists.
+- When asked about a customer, look them up with get_customer. When the owner mentions something like "bad lower back" or "likes it firm", offer to save it with update_customer.
+- If the owner says a customer did not show up after the booking time, record it with mark_no_show.
 - Before cancelling, changing or recording payment for a booking, find its id with find_reservations_by_customer or get_today_reservations.
 - Say "done" or "noted" only when a tool result has ok: true. If it fails, briefly relay the error reason as given.
 - If the owner declines an action, tell them it was not carried out.
@@ -395,6 +432,11 @@ Rules:
 - check_cash readings are a reference only. Always remind the owner to confirm by touch. Recording is a separate step with record_onsite_payment (use the total from the reading in the history as the amount).
 - For "why", "how should I", requests for advice, worries or venting, call ask_advisor.
 - If the history contains an unanswered confirmation question, do not restart that action unless the owner asks again.
+- The system asks about one setting per day when the admin panel opens. Do not bring up settings yourself (answer if the owner asks).
+- If the system just asked about a setting and the owner answers, call the matching settings tool. "That's fine as is" means set_setup_item with done; "don't ask" means skip. For "later", call nothing and just say okay.
+- Whenever the owner says to stop asking about settings, call set_setup_item with item all and status skip. Never say you will stop without calling it.
+- If no name is given for a menu, name it from its length, like "60-minute course".
+- If a tool result has a suggestion, pass it on once, as given, after reporting the result.
 - You are the owner's right hand. Empathize first with worries or complaints. Do not pry.`;
   }
 

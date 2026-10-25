@@ -9,6 +9,8 @@ import Lookup from "@/pages/Lookup";
 import PayResult from "@/pages/PayResult";
 import VoiceSettings from "@/pages/VoiceSettings";
 import VoiceCheck from "@/pages/VoiceCheck";
+import Staff from "@/pages/Staff";
+import StaffJoin from "@/pages/StaffJoin";
 import { Layout } from "@/components/Layout";
 
 export default function App() {
@@ -24,6 +26,8 @@ export default function App() {
       <Route path="/pay/result" component={PayResult} />
       <Route path="/voice" component={VoiceSettings} />
       <Route path="/voice-check" component={VoiceCheck} />
+      <Route path="/staff/join" component={StaffJoin} />
+      <Route path="/staff" component={Staff} />
       <Route><Layout title="404"><p>Not found</p></Layout></Route>
     </Switch>
   );

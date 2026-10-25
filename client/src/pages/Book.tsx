@@ -17,8 +17,9 @@ type Shop = { slug: string; name: string; address: string; phone: string; info: 
 type MenuView = { id: number; name: string; description: string; minutes: number; price: Money };
 type Created = { reservation: { number: string; date: string; time: string; menuName: string; price: Money; paymentUrl: string | null; paymentMethod: string }; paymentNote: string | null; emailNote?: string; shopName: string };
 
-const STEPS = ["menu", "date", "time", "details", "payment", "confirm", "done"] as const;
-type StepKey = (typeof STEPS)[number];
+const ALL_STEPS = ["menu", "staff", "date", "time", "details", "payment", "confirm", "done"] as const;
+type StepKey = (typeof ALL_STEPS)[number];
+type StaffChoice = { id: number; name: string; menuIds: number[] | null };
 const WD = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 
 function addDays(date: string, n: number): string {
@@ -45,13 +46,27 @@ export default function Book({ slug }: { slug: string }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<Created | null>(null);
+  const [staffId, setStaffId] = useState<number | undefined>(undefined);
+  const [couponInput, setCouponInput] = useState("");
+  const [coupon, setCoupon] = useState<{ code: string; discount: Money; price: Money } | null>(null);
+  const [couponError, setCouponError] = useState("");
 
-  const shopQ = useQuery<{ shop: Shop; menus: MenuView[] }>({ queryKey: [`/api/public/shop/${slug}?lang=${lang}`] });
-  const slotsQ = useQuery<{ slots: string[]; closed: boolean }>({ queryKey: [`/api/public/shop/${slug}/slots?menuId=${menu?.id}&date=${date}&lang=${lang}`], enabled: !!menu && !!date });
+  async function applyCoupon(e: React.FormEvent) {
+    e.preventDefault();
+    if (!menu || !couponInput.trim()) return;
+    setCouponError("");
+    try { setCoupon(await apiRequest<{ code: string; discount: Money; price: Money }>("GET", `/api/public/shop/${slug}/coupon?menuId=${menu.id}&code=${encodeURIComponent(couponInput)}&lang=${lang}`)); }
+    catch (err) { setCoupon(null); setCouponError(err instanceof ApiRequestError ? err.message : t("error")); }
+  }
+
+  const shopQ = useQuery<{ shop: Shop; menus: MenuView[]; staff: StaffChoice[] }>({ queryKey: [`/api/public/shop/${slug}?lang=${lang}`] });
+  const slotsQ = useQuery<{ slots: string[]; closed: boolean }>({ queryKey: [`/api/public/shop/${slug}/slots?menuId=${menu?.id}&date=${date}&lang=${lang}${staffId ? `&staffId=${staffId}` : ""}`], enabled: !!menu && !!date });
   const shop = shopQ.data?.shop;
   const weekdays = t("weekdayShort").split(",");
 
   useEffect(() => { if (shop && !shop.allowCardPayment) setPayment("onsite"); }, [shop]);
+  // メニューを選び直したら、クーポンの額は計算し直してもらう
+  useEffect(() => { setCoupon(null); setCouponError(""); }, [menu]);
   useEffect(() => { document.getElementById("main")?.focus(); }, [step]);
 
   const dates = useMemo(() => {
@@ -68,6 +83,9 @@ export default function Book({ slug }: { slug: string }) {
   if (shopQ.isError) return <Layout title={t("bookTitle")}><p role="alert">{t("error")}</p></Layout>;
   if (!shop) return <Layout title={t("bookTitle")}><p>{t("loading")}</p></Layout>;
 
+  // 指名できるスタッフ（そのコースを受けられる人）がいるときだけ「担当を選ぶ」を挟む
+  const nominable = (shopQ.data?.staff ?? []).filter((s) => !menu || !s.menuIds || s.menuIds.includes(menu.id));
+  const STEPS = ALL_STEPS.filter((k) => k !== "staff" || nominable.length > 0);
   const stepIndex = STEPS.indexOf(step);
   const back = () => setStep(STEPS[Math.max(0, stepIndex - 1)]);
   const fmtDate = (d: string) => `${d} (${weekdays[weekdayIndex(d)]})`;
@@ -76,7 +94,7 @@ export default function Book({ slug }: { slug: string }) {
     if (!menu) return;
     setBusy(true); setError("");
     try {
-      const res = await apiRequest<Created>("POST", `/api/public/shop/${slug}/reservations`, { menuId: menu.id, date, time, name, phone, email: email || undefined, paymentMethod: payment, lang });
+      const res = await apiRequest<Created>("POST", `/api/public/shop/${slug}/reservations`, { menuId: menu.id, date, time, name, phone, email: email || undefined, paymentMethod: payment, couponCode: coupon?.code, staffId, lang });
       setCreated(res);
       setStep("done");
     } catch (e) {
@@ -94,13 +112,29 @@ export default function Book({ slug }: { slug: string }) {
             <h2 id="h-menu" className="text-xl font-bold mb-3">{t("chooseMenu")}</h2>
             <div className="flex flex-col gap-3">
               {shopQ.data!.menus.map((m) => (
-                <Button key={m.id} size="lg" variant="outline" className="justify-between h-auto py-4 whitespace-normal text-left" onClick={() => { setMenu(m); setStep("date"); }} data-testid={`button-menu-${m.id}`}>
+                <Button key={m.id} size="lg" variant="outline" className="justify-between h-auto py-4 whitespace-normal text-left" onClick={() => {
+                  setMenu(m); setStaffId(undefined);
+                  const canNominate = (shopQ.data!.staff ?? []).some((s) => !s.menuIds || s.menuIds.includes(m.id));
+                  setStep(canNominate ? "staff" : "date");
+                }} data-testid={`button-menu-${m.id}`}>
                   <span><span className="block">{m.name}</span><span className="block text-sm font-normal text-muted-foreground">{t("minutesUnit", { n: m.minutes })}{m.description ? ` · ${m.description}` : ""}</span></span>
                   <span>{m.price.display}</span>
                 </Button>
               ))}
             </div>
             {shop.info && <p className="mt-4 text-sm text-muted-foreground whitespace-pre-wrap">{shop.info}</p>}
+          </section>
+        )}
+
+        {step === "staff" && (
+          <section aria-labelledby="h-staff">
+            <h2 id="h-staff" className="text-xl font-bold mb-3">{t("chooseStaff")}</h2>
+            <div className="flex flex-col gap-3">
+              <Button size="lg" variant={staffId === undefined ? "default" : "outline"} onClick={() => { setStaffId(undefined); setStep("date"); }} data-testid="button-staff-any">{t("anyStaff")}</Button>
+              {nominable.map((s) => (
+                <Button key={s.id} size="lg" variant={staffId === s.id ? "default" : "outline"} onClick={() => { setStaffId(s.id); setStep("date"); }} data-testid={`button-staff-${s.id}`}>{s.name}</Button>
+              ))}
+            </div>
           </section>
         )}
 
@@ -161,11 +195,24 @@ export default function Book({ slug }: { slug: string }) {
             <dl className="rounded-lg border-2 p-4 space-y-2">
               <div className="flex justify-between"><dt>{t("menus")}</dt><dd className="font-semibold">{menu.name} · {t("minutesUnit", { n: menu.minutes })}</dd></div>
               <div className="flex justify-between"><dt>{t("chooseDate")}</dt><dd className="font-semibold">{fmtDate(date)} {time}</dd></div>
+              {nominable.length > 0 && <div className="flex justify-between"><dt>{t("staffLabel")}</dt><dd className="font-semibold">{nominable.find((x) => x.id === staffId)?.name ?? t("anyStaff")}</dd></div>}
               <div className="flex justify-between"><dt>{t("name")}</dt><dd className="font-semibold">{name}</dd></div>
               <div className="flex justify-between"><dt>{t("phone")}</dt><dd className="font-semibold">{phone}</dd></div>
-              <div className="flex justify-between"><dt>{t("price")}</dt><dd className="font-semibold">{menu.price.display}</dd></div>
+              <div className="flex justify-between"><dt>{t("price")}</dt><dd className="font-semibold">{coupon ? <><s className="text-muted-foreground mr-2">{menu.price.display}</s>{coupon.price.display}</> : menu.price.display}</dd></div>
               <div className="flex justify-between"><dt>{t("choosePayment")}</dt><dd className="font-semibold">{payment === "card" ? t("payCard") : t("payOnsite")}</dd></div>
             </dl>
+            {coupon ? (
+              <div className="flex flex-wrap items-center gap-3" role="status">
+                <span className="font-semibold">{t("couponApplied", { code: coupon.code, off: coupon.discount.display })}</span>
+                <Button variant="ghost" size="sm" onClick={() => { setCoupon(null); setCouponInput(""); }}>{t("removeCoupon")}</Button>
+              </div>
+            ) : (
+              <form onSubmit={applyCoupon} className="flex gap-2 items-end">
+                <div className="flex-1"><Label htmlFor="coupon">{t("couponCode")}</Label><Input id="coupon" value={couponInput} onChange={(e) => setCouponInput(e.target.value)} autoCapitalize="characters" data-testid="input-coupon" /></div>
+                <Button type="submit" variant="outline" data-testid="button-apply-coupon">{t("applyCoupon")}</Button>
+              </form>
+            )}
+            {couponError && <p role="alert" className="text-destructive">{couponError}</p>}
             <div className="rounded-lg bg-accent text-accent-foreground p-4">
               <h3 className="font-bold mb-1">{t("cancelPolicy")}</h3>
               <p data-testid="text-cancel-policy">{shop.cancelPolicy}</p>

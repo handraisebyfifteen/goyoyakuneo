@@ -4,10 +4,12 @@
  */
 import type { Owner, Menu, Language } from "@shared/schema";
 import * as storage from "./storage";
-import { checkBookable, refundEligible, type Busy } from "./lib/booking";
-import { fromLocal, addDays, nowLocal, isValidDate, isValidTime, weekdayOf, timeToMinutes } from "./lib/time";
+import { checkBookable, availableSlots, refundEligible, BookingError, type Busy } from "./lib/booking";
+import { candidatesFor, busyFor, orderCandidates } from "./lib/staffing";
+import { fromLocal, addDays, nowLocal, isValidDate, isValidTime, isValidCloseTime, weekdayOf, timeToMinutes } from "./lib/time";
 import { money } from "@shared/money";
 import { ApiError } from "./errors";
+import { normalizeCode, couponProblem, discountFor } from "./lib/coupon";
 import { createPaymentLink } from "./payments";
 import { sendBookingConfirmation, type EmailNote } from "./email";
 
@@ -26,22 +28,131 @@ export async function busyAround(owner: Owner, date: string): Promise<{ reservat
   const rs = await storage.listReservationsBetween(owner.id, from, to);
   const bs = await storage.listBlockedSlots(owner.id, from, to);
   return {
-    reservations: rs.map((r) => ({ id: r.id, startAt: r.startAt, endAt: r.endAt, label: r.customer.name })),
-    blocked: bs.map((b) => ({ id: b.id, startAt: b.startAt, endAt: b.endAt, label: b.reason })),
+    reservations: rs.map((r) => ({ id: r.id, startAt: r.startAt, endAt: r.endAt, label: r.customer.name, staffId: r.staffId })),
+    blocked: bs.map((b) => ({ id: b.id, startAt: b.startAt, endAt: b.endAt, label: b.reason, staffId: b.staffId })),
   };
 }
 
+// ---------- スタッフの割り当て ----------
+
+/** 施術するスタッフ（いなければ、今までどおりオーナーひとりの店として扱う） */
+async function treatingStaff(owner: Owner) {
+  return (await storage.listStaff(owner.id)).filter((s) => s.active && s.treats);
+}
+
+/** 重なりで断られた理由か（スタッフを変えれば入るかもしれない理由） */
+const staffSpecific = (e: BookingError) => e.code === "overlap" || e.code === "day_off";
+
+export type AssignInput = {
+  date: string; time: string; minutes: number; menuId: number | null; source: "web" | "owner";
+  /** 指名・担当を決めて入れるとき */
+  staffId?: number;
+  /** フリーのとき、先に試したい人（日時を変えるときの今の担当） */
+  preferStaffId?: number | null;
+  ignoreId?: number;
+};
+
+/** その日時に入れられるかを確かめて、担当を決める。スタッフのいない店では担当なし */
+export async function assignStaff(owner: Owner, input: AssignInput): Promise<{ startAt: Date; endAt: Date; staffId: number | null; staffName: string }> {
+  const busy = await busyAround(owner, input.date);
+  const base = { settings: bookingSettings(owner), date: input.date, time: input.time, minutes: input.minutes, source: input.source, ignoreId: input.ignoreId };
+  const team = await treatingStaff(owner);
+  if (!team.length) {
+    if (input.staffId !== undefined) throw new ApiError("staff_not_found", 404);
+    return { ...checkBookable({ ...base, ...busy }), staffId: null, staffName: "" };
+  }
+  const cands = candidatesFor(team, { menuId: input.menuId, staffId: input.staffId, source: input.source });
+  if (!cands.length) {
+    if (input.staffId === undefined) throw new ApiError("no_staff_for_menu");
+    throw new ApiError(team.some((s) => s.id === input.staffId) ? "staff_cannot_take" : "staff_not_found");
+  }
+  const day = busy.reservations.filter((r) => r.id !== input.ignoreId);
+  let first: BookingError | null = null;
+  for (const s of orderCandidates(cands, day, input.preferStaffId)) {
+    try {
+      return { ...checkBookable({ ...base, ...busyFor(s.id, busy) }), staffId: s.id, staffName: s.name };
+    } catch (e) {
+      if (!(e instanceof BookingError)) throw e;
+      // 営業時間外・過去など、誰でも同じ理由ならそのまま返す
+      if (!staffSpecific(e)) throw e;
+      first ??= e;
+    }
+  }
+  if (cands.length === 1 && first) throw first;
+  throw new ApiError("no_staff_available");
+}
+
+/** 空いている開始時刻。スタッフのいる店では、受けられる人のだれかが空いていれば空き */
+export async function slotsFor(owner: Owner, input: { date: string; minutes: number; menuId: number | null; source: "web" | "owner"; staffId?: number; ignoreId?: number }) {
+  if (!isValidDate(input.date)) throw new ApiError("invalid_date");
+  const busy = await busyAround(owner, input.date);
+  busy.reservations = busy.reservations.filter((r) => r.id !== input.ignoreId);
+  const base = { settings: bookingSettings(owner), date: input.date, minutes: input.minutes, source: input.source };
+  const team = await treatingStaff(owner);
+  if (!team.length) return availableSlots({ ...base, ...busy });
+  const cands = candidatesFor(team, { menuId: input.menuId, staffId: input.staffId, source: input.source });
+  const all = new Set<string>();
+  let closed = false;
+  for (const s of cands) {
+    const r = availableSlots({ ...base, ...busyFor(s.id, busy) });
+    closed = r.closed;
+    r.slots.forEach((t) => all.add(t));
+  }
+  return { slots: Array.from(all).sort(), closed };
+}
+
+/**
+ * スタッフを初めて登録するとき、オーナー本人の枠を作り、それまでの予約をそこに割り当てる
+ * （そうしないと、今までの予約がだれの時間もふさがなくなる）
+ */
+export async function ensureStaffMode(owner: Owner, lang: Language) {
+  const all = await storage.listStaff(owner.id);
+  if (all.length) return;
+  const me = await storage.createStaff({ ownerId: owner.id, name: lang === "ja" ? "オーナー" : "Owner", isOwner: true, role: "manager", sortOrder: 0 });
+  await storage.assignUnstaffedReservations(owner.id, me.id, me.name);
+}
+
 export type CreateReservationInput = {
-  menu: Menu;
+  /** メニューか終わりの時刻のどちらかは要る。両方あれば時間は終わりの時刻で決める */
+  menu?: Menu;
   date: string;
   time: string;
+  endTime?: string;
   customerName: string;
   customerPhone?: string;
   customerEmail?: string | null;
   paymentMethod: "card" | "onsite";
   source: "web" | "owner";
   lang: Language;
+  /** 確認メールを送るか（毎週の予約をまとめて入れるときは、1件目だけ送る） */
+  sendEmail?: boolean;
+  couponCode?: string;
+  /** 指名・担当（スタッフのいる店だけ） */
+  staffId?: number;
 };
+
+/** クーポンを確かめて、割り引く額を返す（コードがなければ割引なし） */
+export async function couponDiscount(owner: Owner, code: string | undefined, menu: Menu | undefined): Promise<{ code: string; discount: number } | null> {
+  const c = code ? normalizeCode(code) : "";
+  if (!c) return null;
+  if (!menu) throw new ApiError("coupon_needs_menu");
+  const coupon = await storage.getCouponByCode(owner.id, c);
+  const problem = couponProblem(coupon, todayFor(owner));
+  if (problem) throw new ApiError(problem);
+  return { code: c, discount: discountFor(coupon!, menu.price) };
+}
+
+/** 予約の長さ（分）。終わりの時刻があればそれで、なければメニューの所要時間で */
+function minutesFor(time: string, endTime: string | undefined, menu: Menu | undefined): number {
+  if (endTime) {
+    if (!isValidTime(time) || !isValidCloseTime(endTime)) throw new ApiError("invalid_time");
+    const m = timeToMinutes(endTime) - timeToMinutes(time);
+    if (m <= 0) throw new ApiError("invalid_time");
+    return m;
+  }
+  if (!menu) throw new ApiError("end_or_menu_required");
+  return menu.minutes;
+}
 
 export async function createReservationFor(owner: Owner, input: CreateReservationInput) {
   const name = storage.cleanName(input.customerName);
@@ -51,18 +162,21 @@ export async function createReservationFor(owner: Owner, input: CreateReservatio
   const email = (input.customerEmail ?? "").trim() || null;
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new ApiError("invalid_email");
   if (input.paymentMethod === "card" && !owner.allowCardPayment && input.source === "web") throw new ApiError("card_not_allowed");
+  if (input.paymentMethod === "card" && !input.menu) throw new ApiError("card_needs_menu");
+  const minutes = minutesFor(input.time, input.endTime, input.menu);
+  const coupon = await couponDiscount(owner, input.couponCode, input.menu);
 
-  const busy = await busyAround(owner, input.date);
-  const { startAt, endAt } = checkBookable({
-    settings: bookingSettings(owner), date: input.date, time: input.time, minutes: input.menu.minutes,
-    reservations: busy.reservations, blocked: busy.blocked, source: input.source,
+  const { startAt, endAt, staffId, staffName } = await assignStaff(owner, {
+    date: input.date, time: input.time, minutes, menuId: input.menu?.id ?? null, source: input.source, staffId: input.staffId,
   });
 
   const customer = await storage.upsertCustomer(owner.id, name, phone, email);
   let row = await storage.createReservation({
-    ownerId: owner.id, customerId: customer.id, menuId: input.menu.id,
-    menuNameJa: input.menu.nameJa, menuNameEn: input.menu.nameEn, minutes: input.menu.minutes,
-    price: input.menu.price, currency: input.menu.currency, startAt, endAt,
+    ownerId: owner.id, customerId: customer.id, menuId: input.menu?.id ?? null,
+    menuNameJa: input.menu?.nameJa ?? "", menuNameEn: input.menu?.nameEn ?? "", minutes,
+    price: (input.menu?.price ?? 0) - (coupon?.discount ?? 0), currency: input.menu?.currency ?? owner.currency, startAt, endAt,
+    couponCode: coupon?.code ?? null, discount: coupon?.discount ?? 0,
+    staffId, staffName, nominated: input.staffId !== undefined,
     status: "confirmed", source: input.source, paymentMethod: input.paymentMethod,
     paymentStatus: input.paymentMethod === "card" ? "unpaid" : "onsite_pending",
   });
@@ -82,7 +196,7 @@ export async function createReservationFor(owner: Owner, input: CreateReservatio
   // メールがあれば確認メールを自動で送る（本人の確認は予約の時点で済んでいる）。失敗しても予約は残す
   let emailNote: EmailNote = "no_email";
   try {
-    emailNote = await sendBookingConfirmation(owner, row);
+    if (input.sendEmail !== false) emailNote = await sendBookingConfirmation(owner, row);
   } catch (e) {
     console.error("[email]", e);
     emailNote = "failed";
@@ -90,10 +204,10 @@ export async function createReservationFor(owner: Owner, input: CreateReservatio
   return { reservation: storage.reservationView(row, owner.timezone, input.lang), paymentNote, emailNote };
 }
 
-export async function cancelReservationFor(owner: Owner, row: storage.ReservationRow, lang: Language) {
+export async function cancelReservationFor(owner: Owner, row: storage.ReservationRow, lang: Language, by: "owner" | "customer" = "owner") {
   if (row.status === "cancelled") throw new ApiError("already_cancelled");
   const wasPaid = row.paymentStatus === "paid";
-  const updated = await storage.updateReservation(owner.id, row.id, { status: "cancelled", cancelledAt: new Date() });
+  const updated = await storage.updateReservation(owner.id, row.id, { status: "cancelled", cancelledAt: new Date(), cancelledBy: by });
   const eligible = wasPaid ? refundEligible(row.startAt, owner.freeCancelHoursBefore) : null;
   return { reservation: storage.reservationView(updated ?? row, owner.timezone, lang), refundEligible: eligible, wasPaid };
 }
@@ -104,7 +218,7 @@ export function todayFor(owner: Owner): string {
 
 // ---------- 予約の変更・現地払いの記録（AI のツールと画面の両方から使う） ----------
 
-export type UpdateReservationInput = { date?: string; time?: string; menu?: Menu; lang: Language };
+export type UpdateReservationInput = { date?: string; time?: string; endTime?: string; menu?: Menu; lang: Language; source?: "web" | "owner"; staffId?: number };
 
 export async function updateReservationFor(owner: Owner, row: storage.ReservationRow, input: UpdateReservationInput) {
   if (row.status === "cancelled") throw new ApiError("already_cancelled");
@@ -112,15 +226,22 @@ export async function updateReservationFor(owner: Owner, row: storage.Reservatio
   const date = input.date ?? cur.date;
   const time = input.time ?? cur.time;
   const menu = input.menu;
-  if (menu && row.paymentStatus === "paid" && menu.price !== row.price) throw new ApiError("paid_menu_locked");
-  const minutes = menu ? menu.minutes : row.minutes;
-  const busy = await busyAround(owner, date);
-  const { startAt, endAt } = checkBookable({
-    settings: bookingSettings(owner), date, time, minutes,
-    reservations: busy.reservations, blocked: busy.blocked, source: "owner", ignoreId: row.id,
+  // クーポンで割り引いた額は、メニューを変えてもそのまま引く
+  const discount = menu ? Math.min(row.discount, menu.price) : row.discount;
+  if (menu && row.paymentStatus === "paid" && menu.price - discount !== row.price) throw new ApiError("paid_menu_locked");
+  // 終わりの時刻を言われたらそれで、メニューを変えたらその所要時間で、どちらもなければ今の長さのまま
+  const minutes = input.endTime ? minutesFor(time, input.endTime, menu) : menu ? menu.minutes : row.minutes;
+  // 担当：言われた人 → 指名の予約なら今の人のまま → フリーなら今の人を先に、だめならほかの人
+  const keep = input.staffId === undefined && row.nominated && row.staffId !== null ? row.staffId : undefined;
+  const a = await assignStaff(owner, {
+    date, time, minutes, menuId: menu ? menu.id : row.menuId, source: input.source ?? "owner", ignoreId: row.id,
+    staffId: input.staffId ?? keep, preferStaffId: row.staffId,
   });
-  const patch: Partial<typeof row> = { startAt, endAt };
-  if (menu) Object.assign(patch, { menuId: menu.id, menuNameJa: menu.nameJa, menuNameEn: menu.nameEn, minutes: menu.minutes, price: menu.price });
+  const { startAt, endAt } = a;
+  // 日時が変わったら、前日のお知らせはやり直す
+  const patch: Partial<typeof row> = { startAt, endAt, minutes, staffId: a.staffId, staffName: a.staffName, ...(input.staffId !== undefined ? { nominated: true } : {}),
+    ...(startAt.getTime() !== row.startAt.getTime() ? { remindedAt: null } : {}) };
+  if (menu) Object.assign(patch, { menuId: menu.id, menuNameJa: menu.nameJa, menuNameEn: menu.nameEn, price: menu.price - discount, discount });
   const updated = await storage.updateReservation(owner.id, row.id, patch);
   return { reservation: storage.reservationView(updated ?? row, owner.timezone, input.lang) };
 }
@@ -129,8 +250,10 @@ export async function recordOnsitePaymentFor(owner: Owner, row: storage.Reservat
   if (row.status === "cancelled") throw new ApiError("already_cancelled");
   if (row.paymentStatus !== "onsite_pending") throw new ApiError("not_onsite_pending");
   if (amountMinor <= 0) throw new ApiError("validation");
-  const updated = await storage.updateReservation(owner.id, row.id, { paymentStatus: "onsite_received", amountReceived: amountMinor, status: "completed" });
-  return { reservation: storage.reservationView(updated ?? row, owner.timezone, lang), differs: amountMinor !== row.price };
+  // メニューなしの予約は、受け取った額がそのまま料金になる
+  const noMenu = row.menuId === null;
+  const updated = await storage.updateReservation(owner.id, row.id, { paymentStatus: "onsite_received", amountReceived: amountMinor, status: "completed", ...(noMenu ? { price: amountMinor } : {}) });
+  return { reservation: storage.reservationView(updated ?? row, owner.timezone, lang), differs: !noMenu && amountMinor !== row.price };
 }
 
 /** 期間の売り上げ：カード・現地払いの内訳、未払いの件数と金額、取り消し件数 */
@@ -142,7 +265,8 @@ export async function salesSummaryFor(owner: Owner, from: string, to: string, la
   const live = (r: storage.ReservationRow) => r.status !== "cancelled";
   const card = sum((r) => live(r) && r.paymentStatus === "paid", (r) => r.amountReceived);
   const onsite = sum((r) => live(r) && r.paymentStatus === "onsite_received", (r) => r.amountReceived);
-  const waiting = rows.filter((r) => live(r) && (r.paymentStatus === "unpaid" || r.paymentStatus === "onsite_pending"));
+  // 無断キャンセルは未払いに数えない（別に件数を出す）
+  const waiting = rows.filter((r) => live(r) && r.status !== "no_show" && (r.paymentStatus === "unpaid" || r.paymentStatus === "onsite_pending"));
   const refundPending = rows.filter((r) => r.status === "cancelled" && r.paymentStatus === "paid");
   return {
     from, to, currency: cur,
@@ -150,21 +274,23 @@ export async function salesSummaryFor(owner: Owner, from: string, to: string, la
     paidCount: rows.filter((r) => live(r) && (r.paymentStatus === "paid" || r.paymentStatus === "onsite_received")).length,
     waitingCount: waiting.length, waitingAmount: money(waiting.reduce((a, r) => a + r.price, 0), cur, lang),
     cancelledCount: rows.filter((r) => r.status === "cancelled").length,
+    noShowCount: rows.filter((r) => r.status === "no_show").length,
     refundPendingCount: refundPending.length, refundPendingAmount: money(refundPending.reduce((a, r) => a + r.amountReceived, 0), cur, lang),
     reservationCount: rows.filter(live).length,
   };
 }
 
 /** 臨時休業・休憩の枠を入れる。予約と重なっていたら止める */
-export async function addBlockedSlotFor(owner: Owner, input: { date: string; start?: string; end?: string; reason?: string }) {
+export async function addBlockedSlotFor(owner: Owner, input: { date: string; start?: string; end?: string; reason?: string; staffId?: number }) {
   if (!isValidDate(input.date)) throw new ApiError("invalid_date");
-  if ((input.start && !isValidTime(input.start)) || (input.end && !isValidTime(input.end))) throw new ApiError("invalid_time");
+  if ((input.start && !isValidTime(input.start)) || (input.end && !isValidCloseTime(input.end))) throw new ApiError("invalid_time");
   const startAt = fromLocal(input.date, input.start ?? "00:00", owner.timezone);
   const endAt = input.end ? fromLocal(input.date, input.end, owner.timezone) : fromLocal(addDays(input.date, 1), "00:00", owner.timezone);
   if (endAt <= startAt) throw new ApiError("invalid_time");
-  const clash = await storage.listReservationsBetween(owner.id, startAt, endAt);
+  // スタッフのお休みなら、その人の予約とだけぶつかりを見る
+  const clash = (await storage.listReservationsBetween(owner.id, startAt, endAt)).filter((r) => input.staffId === undefined || r.staffId === null || r.staffId === input.staffId);
   if (clash.length) throw new ApiError("overlap", 409, { time: storage.reservationView(clash[0], owner.timezone, "ja").time, name: clash[0].customer.name, buffer: 0 });
-  return storage.createBlockedSlot({ ownerId: owner.id, startAt, endAt, reason: input.reason ?? "" });
+  return storage.createBlockedSlot({ ownerId: owner.id, startAt, endAt, reason: input.reason ?? "", staffId: input.staffId ?? null });
 }
 
 /** 営業時間を変えたあと、新しい時間から外れる今後の予約を知らせる */

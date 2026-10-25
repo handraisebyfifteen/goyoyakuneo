@@ -74,3 +74,15 @@ test("合言葉は音声認識の揺れを吸収して照合する", () => {
   assert.equal(verifyPassphrase("ひかりはなこ", h), false);
   assert.equal(normalizePhrase("Ｈｉｋａｒｉ ハナ"), "hikariはな");
 });
+
+test("24時間営業（00:00〜24:00）なら、夜遅い予約も日付の終わりまで入る", () => {
+  const all = { open: "00:00", close: "24:00" };
+  const s24 = { ...settings, hours: { mon: all, tue: all, wed: all, thu: all, fri: all, sat: all, sun: all } };
+  const now = new Date("2026-10-20T00:00:00Z");
+  const ok = checkBookable({ settings: s24, date: "2026-10-30", time: "23:00", minutes: 60, reservations: [], blocked: [], source: "web", now });
+  assert.equal(ok.endAt.toISOString(), "2026-10-30T15:00:00.000Z");
+  assert.throws(() => checkBookable({ settings: s24, date: "2026-10-30", time: "23:30", minutes: 60, reservations: [], blocked: [], source: "web", now }), BookingError);
+  const slots = availableSlots({ settings: s24, date: "2026-10-30", minutes: 60, reservations: [], blocked: [], source: "web", now });
+  assert.equal(slots.slots[0], "00:00");
+  assert.equal(slots.slots[slots.slots.length - 1], "23:00");
+});

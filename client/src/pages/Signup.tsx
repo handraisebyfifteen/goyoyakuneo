@@ -4,16 +4,17 @@ import { Layout } from "@/components/Layout";
 import { VoiceConversation, type Step } from "@/components/VoiceConversation";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
+import { voiceConversationUsable } from "@/lib/speech";
 import { apiRequest, ApiRequestError, queryClient } from "@/lib/queryClient";
 
 export default function Signup() {
   const { t, lang } = useI18n();
   const [, navigate] = useLocation();
-  const [mode, setMode] = useState<"voice" | "form">("voice");
+  const [mode, setMode] = useState<"voice" | "form">(() => (voiceConversationUsable() ? "voice" : "form"));
 
   const steps = useMemo<Step[]>(() => [
     { key: "shopName", prompt: t("askShopName"), label: t("shopName"), type: "text" },
-    { key: "email", prompt: t("askEmail"), label: t("email"), type: "email" },
+    { key: "email", prompt: t("askEmail"), label: t("email"), type: "email", autoComplete: "username" },
     { key: "loginMethod", prompt: t("askLoginMethod"), label: t("loginMethod"), type: "choice", choices: [
       { value: "passphrase", label: t("loginPassphrase"), aliases: ["合言葉", "あいことば", "passphrase", "phrase"] },
       { value: "password", label: t("loginPassword"), aliases: ["パスワード", "password"] },
@@ -32,11 +33,13 @@ export default function Signup() {
     try {
       await apiRequest("POST", "/api/auth/signup", {
         shopName: v.shopName, email: v.email, loginMethod: v.loginMethod, language: lang,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         passphrase: v.loginMethod !== "password" ? v.passphrase : undefined,
         password: v.loginMethod !== "passphrase" ? v.password : undefined,
       });
       await queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
-      navigate("/setup");
+      // 設定の画面には寄らず、すぐ使い始める。必要な設定はパートナー（声のパネル）が少しずつ聞く
+      navigate("/admin");
     } catch (e) {
       return e instanceof ApiRequestError ? e.message : t("error");
     }

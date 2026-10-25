@@ -18,6 +18,11 @@ function recognitionCtor(): SR | null {
 export const ttsSupported = () => typeof window !== "undefined" && "speechSynthesis" in window;
 export const sttSupported = () => typeof window !== "undefined" && recognitionCtor() !== null;
 
+/** スマホ・タブレット（指で触る画面）。VoiceOver / TalkBack が端末に入っているので、アプリは声を出さずにそれに任せる */
+export const isTouchDevice = () => typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches === true;
+/** 声の会話（読み上げ → 聞き取り）をはじめから使ってよいか。使えなければフォームで始める */
+export const voiceConversationUsable = () => sttSupported() && !isTouchDevice() && !getVoicePrefs().mute;
+
 export class SpeechNotAllowed extends Error {}
 
 let voicesReady: Promise<SpeechSynthesisVoice[]> | null = null;
@@ -144,11 +149,11 @@ export function userActivated(): boolean {
 }
 
 /** 読み上げる。終わったら resolve。ブラウザの自動再生制限なら SpeechNotAllowed で reject。
- *  「アプリの読み上げを止める」設定のときは何もしない（スクリーンリーダーに任せる） */
+ *  「アプリの読み上げを止める」設定のときと、スマホのときは何もしない（スクリーンリーダーに任せる） */
 export async function speak(text: string, lang: string, opts: SpeakOptions = {}): Promise<void> {
   if (!ttsSupported() || !text) return;
   const prefs = getVoicePrefs();
-  if (prefs.mute) return;
+  if (prefs.mute || isTouchDevice()) return;
   if (!userActivated()) throw new SpeechNotAllowed("not-allowed");
   // 止めた直後に話すと Chrome が黙って落とすことがあるので、少し待つ
   if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); await new Promise((r) => setTimeout(r, 80)); }

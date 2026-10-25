@@ -10,6 +10,7 @@ import * as storage from "../storage";
 import { agent } from "./agent";
 import { aiConfigured, MODELS } from "./llm";
 import { readCash, cashChange, spokenCash } from "./vision";
+import { briefingFor } from "./briefing";
 import { money } from "@shared/money";
 
 const ownerOf = (req: Request) => (req as AuthedRequest).owner;
@@ -18,6 +19,16 @@ export function registerVoiceRoutes(app: Express) {
   app.get("/api/voice/status", requireOwner, async (req, res) => {
     const owner = ownerOf(req);
     res.json({ ok: true, aiConfigured: aiConfigured(), models: MODELS, pending: agent.hasPending(owner.id), hasPassphrase: !!owner.passphraseHash });
+  });
+
+  // 管理画面を開いたときのお知らせ。伝えた時刻を残すので POST（AI の設定がなくても使える）
+  app.post("/api/voice/briefing", requireOwner, async (req, res) => {
+    const owner = ownerOf(req);
+    try {
+      res.json({ ok: true, ...(await briefingFor(owner, normalizeLang(owner.language))) });
+    } catch (e) {
+      sendError(res, normalizeLang(owner.language), e);
+    }
   });
 
   app.get("/api/voice/history", requireOwner, async (req, res) => {

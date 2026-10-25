@@ -13,9 +13,25 @@ import { ApiError, sendError } from "./errors";
 import { LOGIN_METHODS, LANGUAGES, DEFAULT_HOURS, type Owner } from "@shared/schema";
 import { normalizeLang } from "@shared/i18n";
 import { randomBytes } from "node:crypto";
+import { isValidTimeZone } from "./lib/time";
+
+// 端末の時間帯から国と通貨を決める（登録のときに聞かないため）。知らない時間帯なら言語で決める
+const REGION_BY_TZ: Record<string, { country: string; currency: string }> = {
+  "Asia/Tokyo": { country: "JP", currency: "JPY" }, "Asia/Seoul": { country: "KR", currency: "KRW" }, "Asia/Singapore": { country: "SG", currency: "SGD" },
+  "Europe/London": { country: "GB", currency: "GBP" }, "Europe/Paris": { country: "FR", currency: "EUR" }, "Europe/Berlin": { country: "DE", currency: "EUR" },
+  "Australia/Sydney": { country: "AU", currency: "AUD" }, "Australia/Melbourne": { country: "AU", currency: "AUD" }, "America/Toronto": { country: "CA", currency: "CAD" },
+  "America/Vancouver": { country: "CA", currency: "CAD" }, "America/New_York": { country: "US", currency: "USD" }, "America/Chicago": { country: "US", currency: "USD" },
+  "America/Denver": { country: "US", currency: "USD" }, "America/Los_Angeles": { country: "US", currency: "USD" },
+};
+function regionFor(timezone: string | undefined, isJa: boolean) {
+  const known = timezone ? REGION_BY_TZ[timezone] : undefined;
+  if (known && timezone) return { ...known, timezone };
+  return isJa ? { country: "JP", currency: "JPY", timezone: "Asia/Tokyo" } : { country: "US", currency: "USD", timezone: "America/New_York" };
+}
 
 declare module "express-session" {
-  interface SessionData { ownerId?: number }
+  /** オーナーとスタッフは別々にログインする（同じブラウザではどちらか一方） */
+  interface SessionData { ownerId?: number; staffId?: number }
 }
 
 export function setupSession(app: Express) {
@@ -54,6 +70,7 @@ const signupSchema = z.object({
   loginMethod: z.enum(LOGIN_METHODS).default("both"),
   shopName: z.string().min(1).max(100),
   language: z.enum(LANGUAGES).default("ja"),
+  timezone: z.string().max(60).optional(),
 });
 
 const loginSchema = z.object({
@@ -86,9 +103,7 @@ export function registerAuthRoutes(app: Express) {
         shopNameJa: isJa ? body.shopName : "",
         shopNameEn: isJa ? "" : body.shopName,
         language: body.language,
-        country: isJa ? "JP" : "US",
-        currency: isJa ? "JPY" : "USD",
-        timezone: isJa ? "Asia/Tokyo" : "America/New_York",
+        ...regionFor(body.timezone && isValidTimeZone(body.timezone) ? body.timezone : undefined, isJa),
         hours: DEFAULT_HOURS,
         slug: makeSlug(),
       });
@@ -112,7 +127,17 @@ export function registerAuthRoutes(app: Express) {
         if ((m === "password" || m === "both") && verifySecret(secret, owner.passwordHash)) ok = true;
         if (!ok && (m === "passphrase" || m === "both") && verifyPassphrase(secret, owner.passphraseHash)) ok = true;
       }
-      if (!owner || !ok) throw new ApiError("login_failed", 401);
+      if (!owner || !ok) {
+        // オーナーでなければ、スタッフのパスワードで入れるかを見る
+        const member = await storage.getStaffByEmail(parsed.data.email);
+        if (member && member.active && verifySecret(secret, member.passwordHash)) {
+          req.session.ownerId = undefined;
+          req.session.staffId = member.id;
+          return res.json({ ok: true, owner: null, staff: storage.publicStaff(member) });
+        }
+        throw new ApiError("login_failed", 401);
+      }
+      req.session.staffId = undefined;
       req.session.ownerId = owner.id;
       res.json({ ok: true, owner: storage.publicOwner(owner) });
     } catch (e) {

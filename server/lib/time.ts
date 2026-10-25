@@ -71,6 +71,11 @@ export function isValidTime(s: string): boolean {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
 }
 
+/** 閉店時刻として正しいか（「24:00」も使える） */
+export function isValidCloseTime(s: string): boolean {
+  return isValidTime(s) || s === "24:00";
+}
+
 export function weekdayOf(date: string): WeekdayKey {
   const [y, m, d] = date.split("-").map(Number);
   const js = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun
