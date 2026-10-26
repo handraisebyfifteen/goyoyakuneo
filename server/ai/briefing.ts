@@ -1,7 +1,8 @@
 /**
  * 管理画面を開いたときに、最初に伝えること。AI は使わず、決まった文で速く確実に伝える。
  * - 初めてなら、仕事のパートナーとしてのあいさつ
- * - 前回から、ネットで入った新しい予約と、お客さんの取り消し（オーナーは画面を見ないので、こちらから伝える）
+ * - 前回から、ネットで入った新しい予約と、お客さんの取り消し、カード払いが済んだ・払われずに取り消した予約（オーナーは画面を見ないので、こちらから伝える）
+ *   管理画面を開いている間に起きたものは、liveNoticeFor でその場で伝える（同じ「伝えた時刻」を使うので、二度は言わない）
  * - 今日の予約の件数と、次のお客さん
  * - 明日のお客さんのうち、メールがなくてお知らせを送れない人（電話してもらう。伝えたら伝え済みにする）
  * - スタッフの打刻と予定の変更（予定どおりは件数だけ、要確認は1件ずつ）と、確認待ちの件数（attendance.ts）
@@ -39,6 +40,45 @@ function listOf(rows: storage.ReservationRow[], owner: Owner, lang: Language): s
   return items.join(ja ? "、" : ", ");
 }
 
+/** since から until までの、ネットの予約・お客さんの変更と取り消し・カード払いの知らせ。1つずつの文で返す */
+export async function changesText(owner: Owner, lang: Language, since: Date, until: Date): Promise<string[]> {
+  const ja = lang === "ja";
+  const parts: string[] = [];
+  const { booked, cancelled, moved, paid, expired } = await storage.listChangesSince(owner.id, since, until);
+  if (booked.length) parts.push(ja
+    ? `${booked.length}件、ネットで新しい予約が入りました。${listOf(booked, owner, lang)}です。`
+    : `${booked.length} new online booking${booked.length > 1 ? "s" : ""}: ${listOf(booked, owner, lang)}.`);
+  if (paid.length) parts.push(ja
+    ? `カード払いが${paid.length}件済みました。${listOf(paid, owner, lang)}です。`
+    : `${paid.length} card payment${paid.length > 1 ? "s" : ""} received: ${listOf(paid, owner, lang)}.`);
+  if (moved.length) parts.push(ja
+    ? `お客さんが日時を変えた予約が${moved.length}件あります。新しい日時は、${listOf(moved, owner, lang)}です。`
+    : `${moved.length} booking${moved.length > 1 ? "s were" : " was"} moved by customers. New times: ${listOf(moved, owner, lang)}.`);
+  if (cancelled.length) parts.push(ja
+    ? `お客さんの取り消しが${cancelled.length}件ありました。${listOf(cancelled, owner, lang)}です。`
+    : `${cancelled.length} cancellation${cancelled.length > 1 ? "s" : ""} by customers: ${listOf(cancelled, owner, lang)}.`);
+  if (expired.length) parts.push(ja
+    ? `カード払いの予約が${expired.length}件、30分たっても払われなかったので取り消しました。${listOf(expired, owner, lang)}です。その時間はまた空いています。`
+    : `${expired.length} card booking${expired.length > 1 ? "s were" : " was"} not paid within 30 minutes and cancelled: ${listOf(expired, owner, lang)}. Those times are open again.`);
+  return parts;
+}
+
+/**
+ * 管理画面を開いている間の知らせ。前に伝えたときから新しく起きたことがあれば、文にして伝えたことにする。
+ * なければ空。同時に呼ばれても二度は伝えない（伝えた時刻が変わっていないときだけ進める）
+ */
+export async function liveNoticeFor(owner: Owner, lang: Language): Promise<{ text: string }> {
+  const since = owner.lastBriefedAt;
+  if (!since) return { text: "" };
+  const now = new Date();
+  const parts = await changesText(owner, lang, since, now);
+  if (!parts.length) return { text: "" };
+  if (!(await storage.advanceBriefedAt(owner.id, since, now))) return { text: "" };
+  const text = parts.join(lang === "ja" ? "" : " ");
+  await storage.addChatMessage(owner.id, "assistant", text, MODELS.fast);
+  return { text };
+}
+
 export async function briefingFor(owner: Owner, lang: Language): Promise<{ text: string; first: boolean }> {
   const ja = lang === "ja";
   const now = new Date();
@@ -54,16 +94,9 @@ export async function briefingFor(owner: Owner, lang: Language): Promise<{ text:
       ? `${owner.email ? "" : "登録はあとでかまいません。このまま使い始められます。"}たとえば「田中さん、明日の2時から3時半」と話しかけてくだされば、予約を入れます。マイクのボタンを押して、何でも話しかけてみてください。`
       : `${owner.email ? "" : "You can register later and start right away. "}For example, say "Tanaka, tomorrow from 2 to 3:30" and I will book it. Press the microphone button and try saying anything.`);
   } else {
-    const { booked, cancelled, moved } = await storage.listChangesSince(owner.id, owner.lastBriefedAt!);
-    if (booked.length) parts.push(ja
-      ? `前回から、ネットで新しい予約が${booked.length}件入りました。${listOf(booked, owner, lang)}です。`
-      : `Since last time, ${booked.length} new online booking${booked.length > 1 ? "s" : ""}: ${listOf(booked, owner, lang)}.`);
-    if (moved.length) parts.push(ja
-      ? `お客さんが日時を変えた予約が${moved.length}件あります。新しい日時は、${listOf(moved, owner, lang)}です。`
-      : `${moved.length} booking${moved.length > 1 ? "s were" : " was"} moved by customers. New times: ${listOf(moved, owner, lang)}.`);
-    if (cancelled.length) parts.push(ja
-      ? `お客さんの取り消しが${cancelled.length}件ありました。${listOf(cancelled, owner, lang)}です。`
-      : `${cancelled.length} cancellation${cancelled.length > 1 ? "s" : ""} by customers: ${listOf(cancelled, owner, lang)}.`);
+    const changes = await changesText(owner, lang, owner.lastBriefedAt!, now);
+    if (changes.length) changes[0] = ja ? `前回から、${changes[0]}` : `Since last time, ${changes[0].charAt(0).toLowerCase()}${changes[0].slice(1)}`;
+    parts.push(...changes);
 
     const today = todayFor(owner);
     const rows = await storage.listReservationsByDates(owner.id, owner.timezone, today, today);

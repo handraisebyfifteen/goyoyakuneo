@@ -41,8 +41,9 @@ export const EMPTY_SETUP: SetupState = { done: [], skipped: [], asks: {} };
  * attendance: 打刻のお知らせ（all=全部、checks=確認が必要なものと予定の変更だけ、off=伝えない）
  * attendanceEmail: 確認が必要な打刻を、その場でオーナーにメールでも知らせるか
  */
-export type NoticePrefs = { attendance: "all" | "checks" | "off"; attendanceEmail: boolean };
-export const DEFAULT_NOTICE: NoticePrefs = { attendance: "all", attendanceEmail: false };
+/** paymentEmail：カード払いが済んだとき・未払いで取り消したときに、オーナーにもメールで知らせるか（古い設定にはないので、なければ送る） */
+export type NoticePrefs = { attendance: "all" | "checks" | "off"; attendanceEmail: boolean; paymentEmail?: boolean };
+export const DEFAULT_NOTICE: NoticePrefs = { attendance: "all", attendanceEmail: false, paymentEmail: true };
 /** 打刻が「予定どおり」とみなせる幅として選べる分数 */
 export const CLOCK_TOLERANCES = [15, 30] as const;
 
@@ -82,6 +83,11 @@ export const owners = pgTable("owners", {
   minHoursBefore: integer("min_hours_before").notNull().default(2),
   freeCancelHoursBefore: integer("free_cancel_hours_before").notNull().default(24),
   allowCardPayment: boolean("allow_card_payment").notNull().default(true),
+  /** ネットのカード払いは、来店の何時間前の予約まで受けるか（0 なら受付の締め切り minHoursBefore と同じ）。いたずらの予約で枠をふさがれないように */
+  cardMinHoursBefore: integer("card_min_hours_before").notNull().default(24),
+  /** カード払いの入金先（お店の Stripe アカウント、Stripe Connect）。cardReady は Stripe の審査が済んで、決済を受けられる状態か */
+  stripeAccountId: text("stripe_account_id"),
+  cardReady: boolean("card_ready").notNull().default(false),
   slug: text("slug").notNull().unique(),
   onboardingDone: boolean("onboarding_done").notNull().default(false),
   /** 管理画面を開いたときのお知らせを最後に伝えた時刻。これ以降の新しい予約・取り消しを次に伝える */
@@ -167,10 +173,12 @@ export const reservations = pgTable(
     amountReceived: integer("amount_received").notNull().default(0),
     stripeSessionId: text("stripe_session_id"),
     stripePaymentIntentId: text("stripe_payment_intent_id"),
+    /** カード払いが済んだ時刻（オーナーに「支払いが済みました」と伝えるため） */
+    paidAt: timestamp("paid_at", { withTimezone: true }),
     paymentUrl: text("payment_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
-    /** 誰が取り消したか（"owner" / "customer"）。お客さんの取り消しだけをオーナーに知らせるため */
+    /** 誰が取り消したか（"owner" / "customer" / "unpaid"＝カード払いが期限までになく自動で取り消した）。オーナー以外の取り消しをオーナーに知らせるため */
     cancelledBy: text("cancelled_by"),
     /** 前日のお知らせを済ませた時刻（メールを送った、またはメールのない人をオーナーに伝えた） */
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
@@ -447,6 +455,29 @@ export const emailLog = pgTable(
   (t) => ({ ownerDate: uniqueIndex("email_log_owner_date").on(t.ownerId, t.date) }),
 );
 
+/**
+ * スマホへの通知（Web Push）の宛先。端末（ブラウザ）ごとに1件。通知を許可した端末だけが持つ。
+ * 送れなくなった宛先（ブラウザが消した、許可を取り消した）は送ったときに消す
+ */
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: serial("id").primaryKey(),
+  ownerId: integer("owner_id").notNull().references(() => owners.id),
+  endpoint: text("endpoint").notNull().unique(),
+  p256dh: text("p256dh").notNull(),
+  auth: text("auth").notNull(),
+  /** どの端末か（「iPhone」「Android」など）。画面で見分けるため */
+  device: text("device").notNull().default(""),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** サーバーが自分で作って持っておく鍵（環境変数がないときの Web Push の鍵など） */
+export const serverKeys = pgTable("server_keys", {
+  name: text("name").primaryKey(),
+  value: text("value").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;
 export type Owner = typeof owners.$inferSelect;
 export type InsertOwner = typeof owners.$inferInsert;
 export type Customer = typeof customers.$inferSelect;
@@ -504,10 +535,11 @@ export const settingsPatchSchema = z.object({
   minHoursBefore: z.number().int().min(0).max(720).optional(),
   freeCancelHoursBefore: z.number().int().min(0).max(720).optional(),
   allowCardPayment: z.boolean().optional(),
+  cardMinHoursBefore: z.number().int().min(0).max(720).optional(),
   allowNomination: z.boolean().optional(),
   clockToleranceMinutes: z.union([z.literal(15), z.literal(30)]).optional(),
   planHorizonDays: z.union([z.literal(7), z.literal(14), z.literal(31), z.literal(62)]).optional(),
-  noticePrefs: z.object({ attendance: z.enum(["all", "checks", "off"]), attendanceEmail: z.boolean() }).optional(),
+  noticePrefs: z.object({ attendance: z.enum(["all", "checks", "off"]), attendanceEmail: z.boolean(), paymentEmail: z.boolean().optional() }).optional(),
   followupAfterDays: z.number().int().min(0).max(365).optional(),
   slug: z.string().regex(/^[a-z0-9-]{3,40}$/).optional(),
   onboardingDone: z.boolean().optional(),

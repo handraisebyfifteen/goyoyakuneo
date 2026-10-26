@@ -13,7 +13,7 @@ import { apiRequest, ApiRequestError } from "@/lib/queryClient";
 import type { Money } from "@shared/money";
 import type { BusinessHours } from "@shared/schema";
 
-type Shop = { slug: string; name: string; address: string; phone: string; info: string; currency: string; hours: BusinessHours; allowCardPayment: boolean; cancelPolicy: string; today: string; lastDate: string; language: string };
+type Shop = { slug: string; name: string; address: string; phone: string; info: string; currency: string; hours: BusinessHours; allowCardPayment: boolean; cardMinHoursBefore: number; cardHoldMinutes: number; cancelPolicy: string; today: string; lastDate: string; language: string };
 type MenuView = { id: number; name: string; description: string; minutes: number; price: Money };
 type Created = { reservation: { number: string; date: string; time: string; menuName: string; price: Money; paymentUrl: string | null; paymentMethod: string }; paymentNote: string | null; emailNote?: string; shopName: string };
 
@@ -61,11 +61,13 @@ export default function Book({ slug }: { slug: string }) {
   }
 
   const shopQ = useQuery<{ shop: Shop; menus: MenuView[]; staff: StaffChoice[] }>({ queryKey: [`/api/public/shop/${slug}?lang=${lang}`] });
-  const slotsQ = useQuery<{ slots: string[]; closed: boolean }>({ queryKey: [`/api/public/shop/${slug}/slots?menuId=${menu?.id}&date=${date}&lang=${lang}${staffId ? `&staffId=${staffId}` : ""}`], enabled: !!menu && !!date });
+  const slotsQ = useQuery<{ slots: string[]; cardSlots?: string[]; closed: boolean }>({ queryKey: [`/api/public/shop/${slug}/slots?menuId=${menu?.id}&date=${date}&lang=${lang}${staffId ? `&staffId=${staffId}` : ""}`], enabled: !!menu && !!date });
   const shop = shopQ.data?.shop;
   const weekdays = t("weekdayShort").split(",");
 
-  useEffect(() => { if (shop && !shop.allowCardPayment) setPayment("onsite"); }, [shop]);
+  // カード払いは、店が受け付けていて、来店の締め切り（初期値24時間前）より先の時間だけ
+  const cardOk = !!shop?.allowCardPayment && !!slotsQ.data?.cardSlots?.includes(time);
+  useEffect(() => { if (!cardOk) setPayment("onsite"); }, [cardOk]);
   // メニューを選び直したら、クーポンの額は計算し直してもらう
   useEffect(() => { setCoupon(null); setCouponError(""); }, [menu]);
   // QR から来たクーポンは、確認の画面で自動で当てる
@@ -186,9 +188,11 @@ export default function Book({ slug }: { slug: string }) {
           <section aria-labelledby="h-pay">
             <h2 id="h-pay" className="text-xl font-bold mb-3">{t("choosePayment")}</h2>
             <div className="flex flex-col gap-3">
-              {shop.allowCardPayment && <Button size="lg" variant="outline" onClick={() => { setPayment("card"); setStep("confirm"); }} data-testid="button-pay-card">{t("payCard")}</Button>}
+              {cardOk && <Button size="lg" variant="outline" onClick={() => { setPayment("card"); setStep("confirm"); }} aria-describedby="pay-card-note" data-testid="button-pay-card">{t("payCard")}</Button>}
               <Button size="lg" variant="outline" onClick={() => { setPayment("onsite"); setStep("confirm"); }} data-testid="button-pay-onsite">{t("payOnsite")}</Button>
             </div>
+            {cardOk && <p id="pay-card-note" className="mt-3 text-sm">{t("cardHoldNote", { min: shop.cardHoldMinutes })}</p>}
+            {shop.allowCardPayment && !cardOk && <p className="mt-3" data-testid="text-card-only-ahead">{t("cardOnlyAhead", { hours: shop.cardMinHoursBefore })}</p>}
           </section>
         )}
 
@@ -204,6 +208,7 @@ export default function Book({ slug }: { slug: string }) {
               <div className="flex justify-between"><dt>{t("price")}</dt><dd className="font-semibold">{coupon ? <><s className="text-muted-foreground mr-2">{menu.price.display}</s>{coupon.price.display}</> : menu.price.display}</dd></div>
               <div className="flex justify-between"><dt>{t("choosePayment")}</dt><dd className="font-semibold">{payment === "card" ? t("payCard") : t("payOnsite")}</dd></div>
             </dl>
+            {payment === "card" && <p className="font-semibold">{t("cardHoldNote", { min: shop.cardHoldMinutes })}</p>}
             {coupon ? (
               <div className="flex flex-wrap items-center gap-3" role="status">
                 <span className="font-semibold">{t("couponApplied", { code: coupon.code, off: coupon.discount.display })}</span>
@@ -232,7 +237,7 @@ export default function Book({ slug }: { slug: string }) {
             <p>{t("keepNumber")}</p>
             <p>{fmtDate(created.reservation.date)} {created.reservation.time} · {created.reservation.menuName} · {created.reservation.price.display}</p>
             {created.reservation.paymentMethod === "card" && created.reservation.paymentUrl && (
-              <p><Button size="lg" asChild><a href={created.reservation.paymentUrl} data-testid="link-pay">{t("payNow")}</a></Button>{created.paymentNote === "placeholder" && <span className="block text-sm text-muted-foreground mt-1">{t("payLinkPlaceholder")}</span>}</p>
+              <p><span className="block font-semibold mb-2" data-testid="text-pay-within">{t("payWithin", { min: shop.cardHoldMinutes })}</span><Button size="lg" asChild><a href={created.reservation.paymentUrl} data-testid="link-pay">{t("payNow")}</a></Button>{created.paymentNote === "placeholder" && <span className="block text-sm text-muted-foreground mt-1">{t("payLinkPlaceholder")}</span>}</p>
             )}
             {created.emailNote && created.emailNote !== "no_email" && (
               <p className="text-sm" role="status" data-testid="text-email-note">{t(created.emailNote === "sent" ? "emailSent" : created.emailNote === "limit" ? "emailLimit" : created.emailNote === "failed" ? "emailFailed" : "emailLogged")}</p>

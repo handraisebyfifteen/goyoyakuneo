@@ -1,12 +1,12 @@
 /**
  * データベースの読み書き。計算は lib/ に任せ、ここは保存と取り出しだけ。
  */
-import { and, asc, desc, eq, gte, lt, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, lte, ne, sql, type SQL } from "drizzle-orm";
 import { db } from "./db";
 import {
-  owners, customers, menus, reservations, blockedSlots, chatMessages, voiceSessions, emailLog, coupons, staff, timeEntries, shopGroups, shifts, attendanceEvents, ownerMemories, apiKeys, expenses, customerTickets, ticketTypes,
+  owners, customers, menus, reservations, blockedSlots, chatMessages, voiceSessions, emailLog, coupons, staff, timeEntries, shopGroups, shifts, attendanceEvents, ownerMemories, apiKeys, expenses, customerTickets, ticketTypes, pushSubscriptions, serverKeys,
   type Owner, type PublicOwner, type Customer, type Menu, type InsertMenu, type Reservation, type InsertReservation,
-  type BlockedSlot, type Language, type Coupon, type Staff, type PublicStaff, type TimeEntry, type ShopGroup, type Shift, type AttendanceEvent, type OwnerMemory, type ApiKey, type Expense, type CustomerTicket, type TicketType,
+  type BlockedSlot, type Language, type Coupon, type Staff, type PublicStaff, type TimeEntry, type ShopGroup, type Shift, type AttendanceEvent, type OwnerMemory, type ApiKey, type Expense, type CustomerTicket, type TicketType, type PushSubscription,
 } from "@shared/schema";
 import { money, type Money } from "@shared/money";
 import { toLocal, fromLocal, addDays } from "./lib/time";
@@ -42,6 +42,14 @@ export async function createOwner(values: typeof owners.$inferInsert): Promise<O
 }
 export async function updateOwner(id: number, patch: Partial<typeof owners.$inferInsert>): Promise<Owner> {
   return (await db.update(owners).set(patch).where(eq(owners.id, id)).returning())[0];
+}
+/** 伝えた時刻を from から to へ進める。ほかで先に進めていたら false */
+export async function advanceBriefedAt(id: number, from: Date, to: Date): Promise<boolean> {
+  const rows = await db.update(owners).set({ lastBriefedAt: to }).where(and(eq(owners.id, id), eq(owners.lastBriefedAt, from))).returning({ id: owners.id });
+  return rows.length > 0;
+}
+export async function getOwnerByStripeAccount(accountId: string): Promise<Owner | undefined> {
+  return (await db.select().from(owners).where(eq(owners.stripeAccountId, accountId)))[0];
 }
 export async function listOwners(): Promise<Owner[]> {
   return db.select().from(owners).orderBy(asc(owners.id));
@@ -460,18 +468,32 @@ export async function updateReservation(ownerId: number, id: number, patch: Part
   return getReservation(ownerId, id);
 }
 
-/** ある時刻より後に、ネットから入った予約と、お客さんが取り消した予約・日時を変えた予約 */
-export async function listChangesSince(ownerId: number, since: Date): Promise<{ booked: ReservationRow[]; cancelled: ReservationRow[]; moved: ReservationRow[] }> {
-  const booked = await db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
-    .where(and(eq(reservations.ownerId, ownerId), eq(reservations.source, "web"), gte(reservations.createdAt, since), ne(reservations.status, "cancelled")))
-    .orderBy(asc(reservations.startAt));
-  const cancelled = await db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
-    .where(and(eq(reservations.ownerId, ownerId), eq(reservations.cancelledBy, "customer"), gte(reservations.cancelledAt, since)))
-    .orderBy(asc(reservations.startAt));
-  const moved = await db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
-    .where(and(eq(reservations.ownerId, ownerId), ne(reservations.status, "cancelled"), gte(reservations.changedByCustomerAt, since), lt(reservations.createdAt, since)))
-    .orderBy(asc(reservations.startAt));
-  return { booked: joinRows(booked), cancelled: joinRows(cancelled), moved: joinRows(moved) };
+/**
+ * ある時刻から until までに、ネットから入った予約、お客さんが取り消した予約・日時を変えた予約、
+ * カード払いが済んだ予約、カード払いがなく自動で取り消した予約
+ */
+export async function listChangesSince(ownerId: number, since: Date, until: Date = new Date()): Promise<{ booked: ReservationRow[]; cancelled: ReservationRow[]; moved: ReservationRow[]; paid: ReservationRow[]; expired: ReservationRow[] }> {
+  const q = (...conds: SQL[]) => db.select().from(reservations).innerJoin(customers, eq(reservations.customerId, customers.id))
+    .where(and(eq(reservations.ownerId, ownerId), ...conds)).orderBy(asc(reservations.startAt)).then(joinRows);
+  const [booked, cancelled, moved, paid, expired] = await Promise.all([
+    q(eq(reservations.source, "web"), gte(reservations.createdAt, since), lt(reservations.createdAt, until), ne(reservations.status, "cancelled")),
+    q(eq(reservations.cancelledBy, "customer"), gte(reservations.cancelledAt, since), lt(reservations.cancelledAt, until)),
+    q(ne(reservations.status, "cancelled"), gte(reservations.changedByCustomerAt, since), lt(reservations.changedByCustomerAt, until), lt(reservations.createdAt, since)),
+    q(eq(reservations.paymentStatus, "paid"), gte(reservations.paidAt, since), lt(reservations.paidAt, until)),
+    q(eq(reservations.cancelledBy, "unpaid"), gte(reservations.cancelledAt, since), lt(reservations.cancelledAt, until)),
+  ]);
+  return { booked, cancelled, moved, paid, expired };
+}
+
+/** ネットから入ったカード払いの予約のうち、before より前に入って、まだ払われていないもの（枠を戻すかを確かめる） */
+export async function listStaleCardHolds(before: Date): Promise<(ReservationRow & { owner: Owner })[]> {
+  const rows = await db.select().from(reservations)
+    .innerJoin(customers, eq(reservations.customerId, customers.id))
+    .innerJoin(owners, eq(reservations.ownerId, owners.id))
+    .where(and(eq(reservations.source, "web"), eq(reservations.paymentMethod, "card"), eq(reservations.paymentStatus, "unpaid"),
+      eq(reservations.status, "confirmed"), lt(reservations.createdAt, before)))
+    .orderBy(asc(reservations.createdAt));
+  return rows.map((x) => ({ ...x.reservations, customer: x.customers, owner: x.owners }));
 }
 
 export async function getReservationByStripeSession(sessionId: string): Promise<Reservation | undefined> {
@@ -525,4 +547,34 @@ export async function takeEmailQuota(ownerId: number, date: string, limit: numbe
   if (row.count >= limit) return false;
   await db.update(emailLog).set({ count: row.count + 1 }).where(eq(emailLog.id, row.id));
   return true;
+}
+
+// ---------- スマホへの通知（Web Push） ----------
+
+export async function listPushSubscriptions(ownerId: number): Promise<PushSubscription[]> {
+  return db.select().from(pushSubscriptions).where(eq(pushSubscriptions.ownerId, ownerId)).orderBy(asc(pushSubscriptions.id));
+}
+/** 同じ端末（endpoint）から登録し直したら、持ち主と鍵を新しくする */
+export async function savePushSubscription(values: typeof pushSubscriptions.$inferInsert): Promise<PushSubscription> {
+  return (await db.insert(pushSubscriptions).values(values)
+    .onConflictDoUpdate({ target: pushSubscriptions.endpoint, set: { ownerId: values.ownerId, p256dh: values.p256dh, auth: values.auth, device: values.device ?? "" } })
+    .returning())[0];
+}
+export async function deletePushSubscription(ownerId: number, endpoint: string): Promise<boolean> {
+  return (await db.delete(pushSubscriptions).where(and(eq(pushSubscriptions.ownerId, ownerId), eq(pushSubscriptions.endpoint, endpoint))).returning()).length > 0;
+}
+export async function deletePushSubscriptionById(ownerId: number, id: number): Promise<boolean> {
+  return (await db.delete(pushSubscriptions).where(and(eq(pushSubscriptions.ownerId, ownerId), eq(pushSubscriptions.id, id))).returning()).length > 0;
+}
+/** 送れなくなった宛先を消す（持ち主を問わない） */
+export async function dropPushEndpoint(endpoint: string): Promise<void> {
+  await db.delete(pushSubscriptions).where(eq(pushSubscriptions.endpoint, endpoint));
+}
+
+/** サーバーの鍵を読む。なければ value を入れる（同時に作られたら先に入った方を使う） */
+export async function serverKey(name: string, make: () => string): Promise<string> {
+  const found = (await db.select().from(serverKeys).where(eq(serverKeys.name, name)))[0];
+  if (found) return found.value;
+  await db.insert(serverKeys).values({ name, value: make() }).onConflictDoNothing();
+  return (await db.select().from(serverKeys).where(eq(serverKeys.name, name)))[0].value;
 }

@@ -14,6 +14,8 @@ import { PayrollCard } from "@/components/PayrollCard";
 import { TicketCard } from "@/components/TicketCard";
 import { FollowupCard } from "@/components/FollowupCard";
 import { BillingCard } from "@/components/BillingCard";
+import { CardPayCard } from "@/components/CardPayCard";
+import { PushCard } from "@/components/PushCard";
 import { CouponCard } from "@/components/CouponCard";
 import { ScanPanel } from "@/components/ScanPanel";
 import { CanDoCard } from "@/components/CanDoCard";
@@ -58,7 +60,7 @@ export default function Admin() {
   const couponsQ = useQuery<{ coupons: { usable: boolean }[] }>({ queryKey: [`/api/owner/coupons?lang=${lang}`], enabled: !!owner });
   const hasCoupons = !!couponsQ.data?.coupons.some((c) => c.usable);
   const [scanOpen, setScanOpen] = useState(false);
-  const [growOpen, setGrowOpen] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("billing"));
+  const [growOpen, setGrowOpen] = useState(() => typeof window !== "undefined" && ["billing", "cardpay"].some((k) => new URLSearchParams(window.location.search).has(k)));
   const calendar = useQuery<{ path: string }>({ queryKey: ["/api/owner/calendar-link"], enabled: !!owner?.registered && growOpen });
   const summary = useQuery<Summary>({ queryKey: [`/api/owner/summary?lang=${lang}`], enabled: !!owner });
 
@@ -180,6 +182,8 @@ export default function Admin() {
         <p className="mt-2 text-sm text-muted-foreground">{t("growHint")}</p>
         <div className="mt-4 grid gap-5 sm:grid-cols-2">
         {!owner.registered && <p className="sm:col-span-2" data-testid="text-guest-grow">{t("guestGrowHint")}</p>}
+        <PushCard owner={owner} />
+        <CardPayCard owner={owner} />
         {owner.registered && !hasStaff && <div className="contents" data-section="staff"><StaffCard menus={menus.data?.menus ?? []} allowNomination={owner.allowNomination} currency={owner.currency} /></div>}
         {!hasTickets && <div className="contents" data-section="tickets"><TicketCard menus={menus.data?.menus ?? []} /></div>}
         {!hasCoupons && <div className="contents" data-section="coupons"><CouponCard /></div>}

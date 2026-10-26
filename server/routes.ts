@@ -8,9 +8,11 @@ import { cancelPolicyText, normalizeLang } from "@shared/i18n";
 import { money, toMinor } from "@shared/money";
 import { availableSlots, refundEligible } from "./lib/booking";
 import { isValidTimeZone, nowLocal, fromLocal, isValidDate, monthRange, addDays } from "./lib/time";
-import { bookingSettings, busyAround, slotsFor, createReservationFor, cancelReservationFor, updateReservationFor, couponDiscount, todayFor, salesSummaryFor, addBlockedSlotFor } from "./services";
+import { bookingSettings, busyAround, slotsFor, cardOpenFrom, createReservationFor, cancelReservationFor, updateReservationFor, couponDiscount, todayFor, salesSummaryFor, addBlockedSlotFor } from "./services";
 import { registerVoiceRoutes } from "./ai/routes";
-import { confirmSession, stripeConfigured } from "./payments";
+import { confirmSession, stripeConfigured, cardPayable, CARD_HOLD_MINUTES } from "./payments";
+import { registerCardPayRoutes } from "./cardpay";
+import { registerPushRoutes, notifyReservation } from "./push";
 import { emailConfigured, sendBookingConfirmation } from "./email";
 import { calendarFeed, calendarTokenFor } from "./calendar";
 import { registerStaffRoutes } from "./staff";
@@ -234,7 +236,8 @@ export function registerRoutes(app: Express) {
       shop: {
         slug: owner.slug, name: storage.shopName(owner, lang), shopNameJa: owner.shopNameJa, shopNameEn: owner.shopNameEn,
         address: owner.address, phone: owner.phone, info: owner.info, language: owner.language, currency: owner.currency,
-        timezone: owner.timezone, hours: owner.hours, allowCardPayment: owner.allowCardPayment,
+        timezone: owner.timezone, hours: owner.hours, allowCardPayment: owner.allowCardPayment && cardPayable(owner),
+        cardMinHoursBefore: owner.cardMinHoursBefore, cardHoldMinutes: CARD_HOLD_MINUTES,
         maxDaysAhead: owner.maxDaysAhead, minHoursBefore: owner.minHoursBefore,
         cancelPolicy: cancelPolicyText(owner.freeCancelHoursBefore, lang), freeCancelHoursBefore: owner.freeCancelHoursBefore,
         today, lastDate: addDays(today, owner.maxDaysAhead), allowNomination: owner.allowNomination,
@@ -254,7 +257,11 @@ export function registerRoutes(app: Express) {
     if (!menu || !menu.active) throw new ApiError("menu_not_found", 404);
     const date = q.date ?? "";
     const staffId = owner.allowNomination && q.staffId ? Number(q.staffId) : undefined;
-    res.json({ ok: true, date, ...(await slotsFor(owner, { date, minutes: menu.minutes, menuId: menu.id, source: "web", staffId })) });
+    const r = await slotsFor(owner, { date, minutes: menu.minutes, menuId: menu.id, source: "web", staffId });
+    // カード払いを選べる時間（来店の cardMinHoursBefore 時間前より先のもの）
+    const from = cardOpenFrom(owner);
+    const cardSlots = isValidDate(date) ? r.slots.filter((t) => fromLocal(date, t, owner.timezone) >= from) : [];
+    res.json({ ok: true, date, ...r, cardSlots });
   }));
 
   // 予約の前に、クーポンで料金がいくらになるかを見る
@@ -354,13 +361,17 @@ export function registerRoutes(app: Express) {
     const r = await updateReservationFor(row.owner, row, { date: b.date, time: b.time, lang, source: "web" });
     const updated = await storage.updateReservation(row.owner.id, row.id, { changedByCustomerAt: new Date() });
     // 新しい日時の確認メールを送る（失敗しても変更は残す）
-    if (updated) await sendBookingConfirmation(row.owner, updated).catch((e) => console.error("[email]", e));
+    if (updated) {
+      notifyReservation(row.owner, updated, "moved");
+      await sendBookingConfirmation(row.owner, updated).catch((e) => console.error("[email]", e));
+    }
     res.json({ ok: true, reservation: updated ? storage.reservationView(updated, row.owner.timezone, lang) : r.reservation });
   }));
 
   app.post("/api/public/lookup/cancel", wrap(async (req, res, lang) => {
     const row = await lookup(lookupBody.parse(req.body));
     const result = await cancelReservationFor(row.owner, row, lang, "customer");
+    notifyReservation(row.owner, row, "cancelled");
     res.json({ ok: true, ...result });
   }));
 
@@ -372,6 +383,8 @@ export function registerRoutes(app: Express) {
   registerBooksRoutes(app);
   registerFollowupRoutes(app);
   registerBillingRoutes(app);
+  registerCardPayRoutes(app);
+  registerPushRoutes(app);
   registerTicketRoutes(app);
   registerPassRoutes(app);
   registerCapabilityRoutes(app);

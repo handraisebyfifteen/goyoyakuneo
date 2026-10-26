@@ -21,7 +21,7 @@ import {
   bookingSettings, busyAround, slotsFor, createReservationFor, cancelReservationFor, updateReservationFor,
   recordOnsitePaymentFor, salesSummaryFor, addBlockedSlotFor, reservationsOutsideHours, todayFor,
 } from "../services";
-import { createPaymentLink } from "../payments";
+import { createPaymentLink, cardPayable } from "../payments";
 import { SETUP_ITEMS, markSetupItem, noteSetupProgress, menuSuggestion, nextSetupQuestion } from "./setup";
 import { normalizeCode } from "../lib/coupon";
 import { seatsFor, timesheetFor, createStaffFor, updateStaffFor, inviteStaff, payrollFor } from "../staff";
@@ -93,8 +93,8 @@ export const TOOL_SPECS: Spec[] = [
     replace_id: { type: "integer", description: "置き換える前の記憶の番号（覚えていることの一覧にある）" },
   }, ["content"]),
   fn("forget", "覚えていることを忘れる。「それは忘れて」「もう違う」と言われたとき。", { id: { type: "integer", description: "記憶の番号" } }, ["id"]),
-  fn("set_notice_preferences", "お知らせの受け取り方を決める。attendance: 打刻のお知らせ（all=全部、checks=確認が必要なものと予定の変更だけ、off=伝えない）。attendance_email: 確認が必要な打刻を、その場でメールでも知らせるか。言われた項目だけ渡す。", {
-    attendance: { type: "string", enum: ["all", "checks", "off"] }, attendance_email: { type: "boolean" },
+  fn("set_notice_preferences", "お知らせの受け取り方を決める。attendance: 打刻のお知らせ（all=全部、checks=確認が必要なものと予定の変更だけ、off=伝えない）。attendance_email: 確認が必要な打刻を、その場でメールでも知らせるか。payment_email: カード払いが済んだとき・払われずに取り消したときに、メールでも知らせるか（画面を開いている間は、その場で声でも伝える）。言われた項目だけ渡す。", {
+    attendance: { type: "string", enum: ["all", "checks", "off"] }, attendance_email: { type: "boolean" }, payment_email: { type: "boolean" },
   }),
   fn("get_books", "経費の一覧と、期間の利益（売り上げ − 経費 − 給与）を見る。経費を消す前に id を調べるのにも使う。", { start_date: DATE, end_date: DATE }),
   fn("get_ticket_types", "回数券・前払いの種類（名前、回数か金額、料金、有効日数、売れた数）を見る。"),
@@ -130,6 +130,7 @@ export const TOOL_SPECS: Spec[] = [
     min_hours_before: { type: "integer", description: "お客さんの予約は何時間前までか" },
     free_cancel_hours_before: { type: "integer", description: "何時間前までのキャンセルなら全額返金か" },
     allow_card_payment: { type: "boolean", description: "予約時のカード前払いを許可するか" },
+    card_min_hours_before: { type: "integer", description: "ネットのカード払いは来店の何時間前の予約までか（いたずらの予約対策。初期値24。0なら当日もカード払いできる）" },
     allow_nomination: { type: "boolean", description: "お客さんがネットの予約でスタッフを指名できるか" },
   }),
   fn("create_menu", "メニューを作る。", { name: STR, minutes: INT, price: MONEY, description: STR }, ["name", "minutes", "price"]),
@@ -356,7 +357,8 @@ const IMPL: Record<string, Impl> = {
       settings: { country: o.country, currency: o.currency, timezone: o.timezone, language: o.language },
       business: { shopName: storage.shopName(o, ctx.lang), address: o.address, phone: o.phone, info: o.info, businessType: o.businessType },
       hours: o.hours,
-      rules: { bufferMinutes: o.bufferMinutes, slotStepMinutes: o.slotStepMinutes, maxDaysAhead: o.maxDaysAhead, minHoursBefore: o.minHoursBefore, freeCancelHoursBefore: o.freeCancelHoursBefore, allowCardPayment: o.allowCardPayment },
+      rules: { bufferMinutes: o.bufferMinutes, slotStepMinutes: o.slotStepMinutes, maxDaysAhead: o.maxDaysAhead, minHoursBefore: o.minHoursBefore, freeCancelHoursBefore: o.freeCancelHoursBefore, allowCardPayment: o.allowCardPayment,
+        cardMinHoursBefore: o.cardMinHoursBefore, cardPayoutReady: cardPayable(o) },
       cancelPolicy: cancelPolicyText(o.freeCancelHoursBefore, ctx.lang),
       hasPassphrase: !!o.passphraseHash,
       bookingPath: `/book/${o.slug}`,
@@ -459,6 +461,7 @@ const IMPL: Record<string, Impl> = {
     const next: NoticePrefs = {
       attendance: att === "all" || att === "checks" || att === "off" ? att : cur.attendance,
       attendanceEmail: bool(a.attendance_email) ?? cur.attendanceEmail,
+      paymentEmail: bool(a.payment_email) ?? cur.paymentEmail ?? true,
     };
     ctx.owner = await markSetupItem(await storage.updateOwner(ctx.owner.id, { noticePrefs: next }), "notices", "done");
     return { ok: true, notice: next };
@@ -564,9 +567,10 @@ const IMPL: Record<string, Impl> = {
     return { ok: true, hours, reservationsNowOutsideHours: outside };
   },
   async update_booking_rules(ctx, a) {
-    const patch = settingsPatchSchema.pick({ bufferMinutes: true, slotStepMinutes: true, maxDaysAhead: true, minHoursBefore: true, freeCancelHoursBefore: true, allowCardPayment: true }).parse({
+    const patch = settingsPatchSchema.pick({ bufferMinutes: true, slotStepMinutes: true, maxDaysAhead: true, minHoursBefore: true, freeCancelHoursBefore: true, allowCardPayment: true, cardMinHoursBefore: true }).parse({
       bufferMinutes: int(a.buffer_minutes), slotStepMinutes: int(a.slot_step_minutes), maxDaysAhead: int(a.max_days_ahead),
       minHoursBefore: int(a.min_hours_before), freeCancelHoursBefore: int(a.free_cancel_hours_before), allowCardPayment: bool(a.allow_card_payment),
+      cardMinHoursBefore: int(a.card_min_hours_before),
     });
     const tol = int(a.clock_tolerance_minutes);
     if (tol !== undefined) Object.assign(patch, settingsPatchSchema.pick({ clockToleranceMinutes: true }).parse({ clockToleranceMinutes: tol }));
@@ -576,7 +580,7 @@ const IMPL: Record<string, Impl> = {
     if (nomination !== undefined) Object.assign(patch, { allowNomination: nomination });
     const o = await storage.updateOwner(ctx.owner.id, patch);
     ctx.owner = o;
-    return { ok: true, rules: { bufferMinutes: o.bufferMinutes, slotStepMinutes: o.slotStepMinutes, maxDaysAhead: o.maxDaysAhead, minHoursBefore: o.minHoursBefore, freeCancelHoursBefore: o.freeCancelHoursBefore, allowCardPayment: o.allowCardPayment, allowNomination: o.allowNomination, clockToleranceMinutes: o.clockToleranceMinutes, planHorizonDays: o.planHorizonDays },
+    return { ok: true, rules: { bufferMinutes: o.bufferMinutes, slotStepMinutes: o.slotStepMinutes, maxDaysAhead: o.maxDaysAhead, minHoursBefore: o.minHoursBefore, freeCancelHoursBefore: o.freeCancelHoursBefore, allowCardPayment: o.allowCardPayment, cardMinHoursBefore: o.cardMinHoursBefore, allowNomination: o.allowNomination, clockToleranceMinutes: o.clockToleranceMinutes, planHorizonDays: o.planHorizonDays },
       cancelPolicy: cancelPolicyText(o.freeCancelHoursBefore, ctx.lang) };
   },
   async create_menu(ctx, a) {

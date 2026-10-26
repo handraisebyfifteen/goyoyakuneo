@@ -4,6 +4,7 @@ import { setupSession } from "./auth";
 import { registerRoutes } from "./routes";
 import { assertStripeTestKeys, handleWebhook } from "./payments";
 import { startReminders } from "./reminders";
+import { startCardHoldSweeper } from "./cardpay";
 
 assertStripeTestKeys(); // 本番用の Stripe キーが入っていたら起動しない
 
@@ -51,4 +52,5 @@ const port = Number(process.env.PORT) || 5000;
   }
   server.listen(port, "0.0.0.0", () => console.log(`goyoyaku-neo listening on ${port}`));
   startReminders();
+  startCardHoldSweeper();
 })();

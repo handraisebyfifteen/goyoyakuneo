@@ -55,10 +55,12 @@ export async function capabilitiesFor(owner: Owner, lang: Language): Promise<Abi
     detail: ja ? "メールのわかるお客さんに自動で送ります。メールのないお客さんは、前の日に電話する人としてお伝えします" : "Sent automatically to customers with an email. Customers without one are listed for you to call the day before",
     say: null,
   });
-  if (owner.allowCardPayment && stripeConfigured()) ready.push({
-    key: "card", section: null,
+  if (owner.allowCardPayment && stripeConfigured() && owner.cardReady) ready.push({
+    key: "card", section: "cardpay",
     title: ja ? "カードで前払いしてもらう" : "Take card payment in advance",
-    detail: ja ? "予約ページでカード払いを選べます。声で支払いのリンクも作れます" : "Customers can pay by card on the booking page. You can also make a payment link by voice",
+    detail: ja
+      ? `予約ページでカード払いを選べます（来店の${owner.cardMinHoursBefore}時間前までの予約）。お金はお店の口座に入ります。声で支払いのリンクも作れます`
+      : `Customers can pay by card on the booking page (bookings at least ${owner.cardMinHoursBefore} hours ahead). The money goes to your account. You can also make a payment link by voice`,
     say: ja ? "田中さんの予約の支払いリンクを作って" : "Make a payment link for Tanaka's booking",
   });
   if (registered && owner.reviewUrl) ready.push({
@@ -161,6 +163,18 @@ export async function capabilitiesFor(owner: Owner, lang: Language): Promise<Abi
     title: ja ? "メニューを1つ決める" : "Add one service",
     detail: ja ? "お客さんがネットから予約できるようになります" : "Customers can then book online",
     say: ja ? "60分6000円のメニューを作って" : "Add a 60-minute service for 6000 yen",
+  });
+  if (!(await storage.listPushSubscriptions(owner.id)).length) next.push({
+    key: "push", section: "push",
+    title: ja ? "スマホに通知を出す" : "Turn on phone notifications",
+    detail: ja ? "アプリを閉じていても、新しい予約やカード払いの知らせが届きます" : "Get booking and payment news even when the app is closed",
+    say: null,
+  });
+  if (registered && stripeConfigured() && !owner.cardReady) next.push({
+    key: "cardpay", section: "cardpay",
+    title: ja ? "カード払いの入金先を登録する" : "Set up card payment",
+    detail: ja ? "お客さんが予約のときにカードで前払いできます。お金は Stripe からお店の口座に直接入ります" : "Customers can prepay by card when they book. Stripe pays the money straight into your account",
+    say: null,
   });
   if (registered && !owner.followupAfterDays && !skipped.includes("followup")) next.push({
     key: "followup", section: "followup",

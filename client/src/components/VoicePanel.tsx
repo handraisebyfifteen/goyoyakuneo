@@ -28,6 +28,8 @@ type Reply =
 
 const PITCH: Record<Model, number> = { daily: 1.05, consult: 0.8 };
 const MAX_SHOWN = 14;
+/** 開いている間に、新しい知らせを聞きに行く間隔 */
+const LIVE_MS = 20_000;
 
 export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?: () => void; onShareLink?: () => void; onRegister?: () => void }) {
   const { t, lang, speechLang } = useI18n();
@@ -276,6 +278,31 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
       .catch(() => sayWelcome(t("voiceWelcome")));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history.data]);
+
+  // 開いている間に起きたこと（ネットの予約、カード払いが済んだ・払われずに取り消した、など）を、その場で伝える。
+  // 会話の途中には割り込まない（何もしていないときだけ聞きに行く。伝えそびれたものは次に回る）。画面が隠れている間は聞かない
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  useEffect(() => {
+    if (!history.data) return;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped || !announced.current || phaseRef.current !== "idle" || document.visibilityState !== "visible") return;
+      try {
+        const r = await apiRequest<{ text: string }>("POST", "/api/voice/live");
+        if (stopped || !r.text) return;
+        push({ role: "assistant", text: r.text });
+        flashSignal("ok");
+        onChanged?.();
+        if (phaseRef.current !== "idle") return;
+        await say(r.text);
+        setPhase((p) => (p === "speaking" ? "idle" : p));
+      } catch { /* 次の回に聞き直す */ }
+    };
+    const timer = setInterval(() => void tick(), LIVE_MS);
+    return () => { stopped = true; clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history.data, say, push]);
 
   useEffect(() => {
     if (!needsGesture) return;

@@ -10,7 +10,8 @@ import { fromLocal, addDays, nowLocal, isValidDate, isValidTime, isValidCloseTim
 import { money } from "@shared/money";
 import { ApiError } from "./errors";
 import { normalizeCode, couponProblem, discountFor } from "./lib/coupon";
-import { createPaymentLink } from "./payments";
+import { createPaymentLink, cardPayable } from "./payments";
+import { notifyReservation } from "./push";
 import { sendBookingConfirmation, type EmailNote } from "./email";
 
 export function bookingSettings(owner: Owner) {
@@ -163,12 +164,14 @@ export async function createReservationFor(owner: Owner, input: CreateReservatio
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new ApiError("invalid_email");
   if (input.paymentMethod === "card" && !owner.allowCardPayment && input.source === "web") throw new ApiError("card_not_allowed");
   if (input.paymentMethod === "card" && !input.menu) throw new ApiError("card_needs_menu");
+  if (input.paymentMethod === "card" && !cardPayable(owner)) throw new ApiError("card_not_ready");
   const minutes = minutesFor(input.time, input.endTime, input.menu);
   const coupon = await couponDiscount(owner, input.couponCode, input.menu);
 
   const { startAt, endAt, staffId, staffName } = await assignStaff(owner, {
     date: input.date, time: input.time, minutes, menuId: input.menu?.id ?? null, source: input.source, staffId: input.staffId,
   });
+  if (input.paymentMethod === "card" && input.source === "web" && startAt < cardOpenFrom(owner)) throw new ApiError("card_too_soon", 400, { hours: owner.cardMinHoursBefore });
 
   const customer = await storage.upsertCustomer(owner.id, name, phone, email);
   let row = await storage.createReservation({
@@ -201,10 +204,12 @@ export async function createReservationFor(owner: Owner, input: CreateReservatio
     console.error("[email]", e);
     emailNote = "failed";
   }
+  // ネットから入った予約は、オーナーのスマホにも知らせる
+  if (input.source === "web") notifyReservation(owner, row, "booked");
   return { reservation: storage.reservationView(row, owner.timezone, input.lang), paymentNote, emailNote };
 }
 
-export async function cancelReservationFor(owner: Owner, row: storage.ReservationRow, lang: Language, by: "owner" | "customer" = "owner") {
+export async function cancelReservationFor(owner: Owner, row: storage.ReservationRow, lang: Language, by: "owner" | "customer" | "unpaid" = "owner") {
   if (row.status === "cancelled") throw new ApiError("already_cancelled");
   // 回数券・前払いで払っていたら、使った分を戻す
   if (row.paymentStatus === "ticket" && row.ticketId) {
@@ -215,6 +220,11 @@ export async function cancelReservationFor(owner: Owner, row: storage.Reservatio
   const updated = await storage.updateReservation(owner.id, row.id, { status: "cancelled", cancelledAt: new Date(), cancelledBy: by });
   const eligible = wasPaid ? refundEligible(row.startAt, owner.freeCancelHoursBefore) : null;
   return { reservation: storage.reservationView(updated ?? row, owner.timezone, lang), refundEligible: eligible, wasPaid };
+}
+
+/** ネットのカード払いを受けられるのは、この時刻より後に始まる予約（cardMinHoursBefore が 0 なら締め切りなし） */
+export function cardOpenFrom(owner: Pick<Owner, "cardMinHoursBefore">, now: Date = new Date()): Date {
+  return new Date(now.getTime() + owner.cardMinHoursBefore * 3600000);
 }
 
 export function todayFor(owner: Owner): string {

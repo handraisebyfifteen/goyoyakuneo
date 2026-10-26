@@ -10,7 +10,7 @@ import * as storage from "../storage";
 import { agent } from "./agent";
 import { aiConfigured, MODELS } from "./llm";
 import { readCash, cashChange, spokenCash } from "./vision";
-import { briefingFor } from "./briefing";
+import { briefingFor, liveNoticeFor } from "./briefing";
 import { money } from "@shared/money";
 
 const ownerOf = (req: Request) => (req as AuthedRequest).owner;
@@ -26,6 +26,16 @@ export function registerVoiceRoutes(app: Express) {
     const owner = ownerOf(req);
     try {
       res.json({ ok: true, ...(await briefingFor(owner, normalizeLang(owner.language))) });
+    } catch (e) {
+      sendError(res, normalizeLang(owner.language), e);
+    }
+  });
+
+  // 管理画面を開いている間に、新しい予約やカード払いが済んだことを伝える（画面が少しずつ聞きに来る）
+  app.post("/api/voice/live", requireOwner, async (req, res) => {
+    const owner = ownerOf(req);
+    try {
+      res.json({ ok: true, ...(await liveNoticeFor(owner, normalizeLang(owner.language))) });
     } catch (e) {
       sendError(res, normalizeLang(owner.language), e);
     }

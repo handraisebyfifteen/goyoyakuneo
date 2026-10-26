@@ -12,7 +12,7 @@ export type ErrorCode =
   | "past_time" | "day_off" | "closed_day" | "outside_hours" | "too_soon" | "too_far"
   | "overlap" | "menu_not_found" | "reservation_not_found" | "already_cancelled"
   | "invalid_date" | "invalid_time" | "name_required" | "phone_required" | "invalid_email"
-  | "currency_locked" | "invalid_timezone" | "card_not_allowed" | "email_in_use" | "slug_in_use"
+  | "currency_locked" | "invalid_timezone" | "card_not_allowed" | "card_not_ready" | "card_too_soon" | "email_in_use" | "slug_in_use"
   | "login_failed" | "passphrase_short" | "passphrase_wrong" | "unauthorized" | "validation"
   | "not_found" | "server_error" | "paid_menu_locked" | "not_onsite_pending" | "not_card_unpaid"
   | "unknown_tool" | "owner_declined" | "passphrase_locked" | "passphrase_missing" | "passphrase_rejected" | "ai_unavailable" | "blocked_slot_not_found" | "cash_unreadable" | "cash_not_found"
@@ -42,6 +42,8 @@ const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
     currency_locked: () => "メニューや予約がある状態では、通貨は変えられません",
     invalid_timezone: () => "時間帯の名前が正しくありません",
     card_not_allowed: () => "この店舗ではカード払いを受け付けていません",
+    card_not_ready: () => "カード払いの入金先（Stripe）の登録が済んでいないため、カード払いはまだ使えません。管理画面の「カード払い」から登録できます",
+    card_too_soon: (p) => `カード払いは、ご来店の${p.hours}時間前までのご予約に限ります。当日、お店でお支払いください`,
     email_in_use: () => "このメールアドレスはすでに登録されています",
     slug_in_use: () => "この予約ページのアドレスはすでに使われています",
     login_failed: () => "メールアドレス、またはパスワード・合言葉が違います",
@@ -111,6 +113,8 @@ const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
     currency_locked: () => "The currency cannot be changed once menus or bookings exist.",
     invalid_timezone: () => "The time zone name is not valid.",
     card_not_allowed: () => "This shop does not accept card payment.",
+    card_not_ready: () => "Card payment is not available yet because the payout account (Stripe) is not set up. You can set it up under \"Card payment\" in the admin page.",
+    card_too_soon: (p) => `Card payment is only for bookings made at least ${p.hours} hours ahead. Please pay at the shop.`,
     email_in_use: () => "This email address is already registered.",
     slug_in_use: () => "This booking page address is already taken.",
     login_failed: () => "The email, password, or passphrase is incorrect.",

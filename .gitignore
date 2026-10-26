@@ -3,3 +3,4 @@ dist/
 .env
 *.log
 _old/__pycache__/
+backups/

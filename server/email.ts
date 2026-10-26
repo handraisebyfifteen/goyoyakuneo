@@ -21,7 +21,7 @@ const TEXT = {
     intro: "ご予約ありがとうございます。以下の内容で承りました。",
     when: "日時", duration: "所要時間", menu: "メニュー", price: "料金", pay: "お支払い",
     card: "カード（事前のお支払い）", onsite: "当日、店舗でのお支払い",
-    link: "お支払いはこちらから", where: "場所", phone: "お電話", info: "ご案内", cancel: "キャンセルについて",
+    link: "お支払いはこちらから", hold: "30分以内にお支払いがない場合、ご予約は自動で取り消しとなります。", where: "場所", phone: "お電話", info: "ご案内", cancel: "キャンセルについて",
     number: "予約番号", keep: "予約の確認や取り消しには、この番号とお電話番号が必要です。",
     minutes: (n: number) => `${n}分`,
     remindSubject: (shop: string, date: string, time: string) => `【${shop}】明日のご予約のお知らせ（${date} ${time}）`,
@@ -38,7 +38,7 @@ const TEXT = {
     intro: "Thank you for your booking. Here are the details.",
     when: "Date and time", duration: "Duration", menu: "Service", price: "Price", pay: "Payment",
     card: "Card (pay in advance)", onsite: "Pay at the shop",
-    link: "Pay here", where: "Address", phone: "Phone", info: "Notes", cancel: "Cancellation policy",
+    link: "Pay here", hold: "If payment is not completed within 30 minutes, the booking is cancelled automatically.", where: "Address", phone: "Phone", info: "Notes", cancel: "Cancellation policy",
     number: "Booking number", keep: "You need this number and your phone number to look up or cancel the booking.",
     minutes: (n: number) => `${n} min`,
     remindSubject: (shop: string, date: string, time: string) => `[${shop}] Reminder: your booking tomorrow (${date} ${time})`,
@@ -76,7 +76,10 @@ function compose(owner: Owner, r: storage.ReservationRow, kind: "confirm" | "rem
     ...(v.price ? [`${t.price}: ${v.price.display}${v.couponCode && v.discount ? (lang === "ja" ? `（クーポン ${v.couponCode} で ${v.discount.display} 引き）` : ` (coupon ${v.couponCode}: ${v.discount.display} off)`) : ""}`] : []),
     `${t.pay}: ${v.paymentMethod === "card" ? t.card : t.onsite}`,
   ];
-  if (v.paymentMethod === "card" && v.paymentUrl) lines.push(`${t.link}: ${v.paymentUrl}`);
+  if (v.paymentMethod === "card" && v.paymentUrl && v.paymentStatus === "unpaid") {
+    lines.push(`${t.link}: ${v.paymentUrl}`);
+    if (kind === "confirm" && r.source === "web") lines.push(t.hold);
+  }
   lines.push("", `${t.number}: ${v.number}`, kind === "remind" ? t.remindChange : t.keep, "");
   if (owner.address) lines.push(`${t.where}: ${owner.address}`);
   if (owner.phone) lines.push(`${t.phone}: ${owner.phone}`);
@@ -95,12 +98,53 @@ export function dailyLimit(): number {
 }
 
 /** 予約確認メールを送る。結果は短い記号で返す（本文に失敗の詳細は入れない。詳細はログへ） */
-/** オーナーへのお知らせ（確認が必要な打刻など）。オーナーのログイン用のメールアドレスに送る */
-export async function sendOwnerNotice(owner: Owner, subject: string, body: string): Promise<EmailNote> {
+/** オーナーへのお知らせ（確認が必要な打刻、カード払いなど）。オーナーのログイン用のメールアドレスに送る。footer がなければ打刻の案内を添える */
+export async function sendOwnerNotice(owner: Owner, subject: string, body: string, footer?: string): Promise<EmailNote> {
   const lang = normalizeLang(owner.language);
   const shop = storage.shopName(owner, lang) || (lang === "ja" ? "ご予約ちゃん" : "GoYoyaku-chan");
   if (!owner.email) return "unregistered";
-  return deliver(owner, owner.email, { subject: `【${shop}】${subject}`, text: [body, "", lang === "ja" ? "管理画面の「打刻の確認」で確認できます。" : "You can review it under \"Clock records to confirm\" in the admin page.", "", shop].join("\n") }, "オーナーへのお知らせ");
+  const foot = footer ?? (lang === "ja" ? "管理画面の「打刻の確認」で確認できます。" : "You can review it under \"Clock records to confirm\" in the admin page.");
+  return deliver(owner, owner.email, { subject: `【${shop}】${subject}`, text: [body, "", foot, "", shop].join("\n") }, "オーナーへのお知らせ");
+}
+
+/**
+ * カード払いのお知らせをオーナーに（支払いが済んだ／払われずに取り消した）。
+ * 画面読み上げで件名から聞くので、件名だけで中身がわかるようにする
+ */
+export async function sendPaymentNotice(owner: Owner, r: storage.ReservationRow, kind: "paid" | "expired"): Promise<EmailNote> {
+  const lang = normalizeLang(owner.language);
+  const ja = lang === "ja";
+  const v = storage.reservationView(r, owner.timezone, lang);
+  const who = ja ? `${v.customerName}様 ${v.date} ${v.time}` : `${v.customerName}, ${v.date} ${v.time}`;
+  const subject = kind === "paid"
+    ? (ja ? `カード払い完了：${who}` : `Card payment received: ${who}`)
+    : (ja ? `未払いのため取り消し：${who}` : `Cancelled, not paid: ${who}`);
+  const body = kind === "paid"
+    ? (ja ? `${v.customerName}様（${v.date} ${v.time}、${v.menuName}）のカード払い ${v.price?.display ?? ""} が済みました。予約番号は${v.number}です。` : `${v.customerName} (${v.date} ${v.time}, ${v.menuName}) paid ${v.price?.display ?? ""} by card. Booking number ${v.number}.`)
+    : (ja ? `${v.customerName}様（${v.date} ${v.time}、${v.menuName}）のカード払いの予約は、30分たってもお支払いがなかったので取り消しました。その時間は、また予約を受けられます。` : `The card booking for ${v.customerName} (${v.date} ${v.time}, ${v.menuName}) was not paid within 30 minutes, so it was cancelled. That time is open again.`);
+  const footer = kind === "paid"
+    ? (ja ? "入金や返金は Stripe の管理画面で確認できます。" : "Payouts and refunds are in your Stripe dashboard.")
+    : (ja ? "お客さんには、取り消したことをメールでお知らせしています（メールのある方のみ）。" : "The customer was told by email (if they gave one).");
+  return sendOwnerNotice(owner, subject, body, footer);
+}
+
+/** カード払いがなく自動で取り消したことを、お客さんに知らせる。もう一度予約できるページを添える */
+export function composeHoldExpired(owner: Owner, r: storage.ReservationRow, bookingUrl: string): { subject: string; text: string } {
+  const lang = normalizeLang(owner.language);
+  const ja = lang === "ja";
+  const v = storage.reservationView(r, owner.timezone, lang);
+  const shop = storage.shopName(owner, lang) || (ja ? "ご予約ちゃん" : "GoYoyaku-chan");
+  const lines = ja
+    ? [`${v.customerName} 様`, "", `${v.date} ${v.time}（${v.menuName}）のご予約は、30分以内にカードのお支払いが確認できなかったため、取り消しとなりました。`,
+      "料金はいただいていません。", "", `改めてのご予約はこちらから: ${bookingUrl}`, "", shop]
+    : [`Dear ${v.customerName},`, "", `Your booking on ${v.date} at ${v.time} (${v.menuName}) was cancelled because the card payment was not completed within 30 minutes.`,
+      "You have not been charged.", "", `You can book again here: ${bookingUrl}`, "", shop];
+  return { subject: ja ? `【${shop}】お支払いがなかったため、ご予約を取り消しました` : `[${shop}] Your booking was cancelled (not paid)`, text: lines.join("\n") };
+}
+
+export async function sendHoldExpired(owner: Owner, r: storage.ReservationRow, bookingUrl: string): Promise<EmailNote> {
+  if (!r.customer.email) return "no_email";
+  return deliver(owner, r.customer.email, composeHoldExpired(owner, r, bookingUrl), "未払いの取り消し");
 }
 
 /** 次回の声かけ。「そろそろいかがですか」と予約のページ、配信を止めるリンク */
