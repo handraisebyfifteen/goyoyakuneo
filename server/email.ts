@@ -5,13 +5,14 @@
  * - キーがないときは送らず、サーバーのログに中身を出す
  * - 支払い完了の領収書は Stripe に任せる（ここでは送らない）
  */
-import type { Owner } from "@shared/schema";
+import type { Owner, Customer, CustomerTicket } from "@shared/schema";
 import { cancelPolicyText, normalizeLang, WEEKDAY_LABELS } from "@shared/i18n";
 import { WEEKDAY_KEYS } from "@shared/schema";
 import * as storage from "./storage";
 import { nowLocal, weekdayOf } from "./lib/time";
 
-export type EmailNote = "sent" | "logged" | "limit" | "failed" | "no_email";
+/** unregistered: お店を登録する前は、だれにもメールを送らない（名前のないお店からのメールにしないため） */
+export type EmailNote = "sent" | "logged" | "limit" | "failed" | "no_email" | "unregistered";
 
 const TEXT = {
   ja: {
@@ -94,6 +95,36 @@ export function dailyLimit(): number {
 }
 
 /** 予約確認メールを送る。結果は短い記号で返す（本文に失敗の詳細は入れない。詳細はログへ） */
+/** オーナーへのお知らせ（確認が必要な打刻など）。オーナーのログイン用のメールアドレスに送る */
+export async function sendOwnerNotice(owner: Owner, subject: string, body: string): Promise<EmailNote> {
+  const lang = normalizeLang(owner.language);
+  const shop = storage.shopName(owner, lang) || (lang === "ja" ? "ご予約ちゃん" : "GoYoyaku-chan");
+  if (!owner.email) return "unregistered";
+  return deliver(owner, owner.email, { subject: `【${shop}】${subject}`, text: [body, "", lang === "ja" ? "管理画面の「打刻の確認」で確認できます。" : "You can review it under \"Clock records to confirm\" in the admin page.", "", shop].join("\n") }, "オーナーへのお知らせ");
+}
+
+/** 次回の声かけ。「そろそろいかがですか」と予約のページ、配信を止めるリンク */
+export async function sendFollowup(owner: Owner, c: Customer, days: number, bookingUrl: string, unsubscribeUrl: string): Promise<EmailNote> {
+  if (!c.email) return "no_email";
+  const lang = normalizeLang(owner.language);
+  const shop = storage.shopName(owner, lang) || (lang === "ja" ? "ご予約ちゃん" : "GoYoyaku-chan");
+  const text = lang === "ja"
+    ? [`${c.name} 様`, "", `前回のご来店から${days}日ほどたちました。お体の調子はいかがですか。`, "よろしければ、またお待ちしております。", "", `ご予約はこちらから: ${bookingUrl}`, "", shop, "", `このようなご案内が不要な方は、こちらから止められます: ${unsubscribeUrl}`].join("\n")
+    : [`Dear ${c.name},`, "", `It has been about ${days} days since your last visit. How are you feeling?`, "We would be glad to see you again.", "", `Book here: ${bookingUrl}`, "", shop, "", `To stop these suggestions: ${unsubscribeUrl}`].join("\n");
+  return deliver(owner, c.email, { subject: lang === "ja" ? `【${shop}】そろそろいかがですか` : `[${shop}] Time for your next visit?`, text }, "次回の声かけ");
+}
+
+/** 回数券・前払いのご案内。お会計のときに見せる QR コードのページのリンク */
+export async function sendTicketPass(owner: Owner, c: Customer, t: CustomerTicket, url: string): Promise<EmailNote> {
+  if (!c.email) return "no_email";
+  const lang = normalizeLang(owner.language);
+  const shop = storage.shopName(owner, lang) || (lang === "ja" ? "ご予約ちゃん" : "GoYoyaku-chan");
+  const text = lang === "ja"
+    ? [`${c.name} 様`, "", `${t.name}をお買い上げいただき、ありがとうございます。`, "お会計のときに、下のページの QR コードをお見せください。残りの回数や金額もこのページで確かめられます。", "", url, ...(t.expiresOn ? ["", `期限：${t.expiresOn}まで`] : []), "", shop].join("\n")
+    : [`Dear ${c.name},`, "", `Thank you for purchasing ${t.name}.`, "Please show the QR code on this page when you pay. You can also check what is left here.", "", url, ...(t.expiresOn ? ["", `Valid until ${t.expiresOn}`] : []), "", shop].join("\n");
+  return deliver(owner, c.email, { subject: lang === "ja" ? `【${shop}】${t.name}のご案内` : `[${shop}] Your ${t.name}`, text }, "回数券のご案内");
+}
+
 /** スタッフへの招待。リンクから本人がパスワードを決める */
 export async function sendStaffInvite(owner: Owner, to: string, staffName: string, url: string): Promise<EmailNote> {
   const lang = normalizeLang(owner.language);
@@ -129,6 +160,7 @@ export async function sendReminder(owner: Owner, r: storage.ReservationRow): Pro
 }
 
 async function deliver(owner: Owner, to: string, { subject, text }: { subject: string; text: string }, label: string): Promise<EmailNote> {
+  if (!owner.email) return "unregistered";
   if (!emailConfigured()) {
     console.log(`\n--- ${label}（送信の設定がないため表示のみ）---\n宛先: ${to}\n件名: ${subject}\n\n${text}\n---\n`);
     return "logged";

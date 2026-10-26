@@ -11,14 +11,17 @@ import type { Owner, Staff, Language } from "@shared/schema";
 import { STAFF_ROLES } from "@shared/schema";
 import { normalizeLang } from "@shared/i18n";
 import * as storage from "./storage";
-import { requireOwner, type AuthedRequest } from "./auth";
+import { requireOwner, requireRegistered, type AuthedRequest } from "./auth";
 import { ApiError, sendError } from "./errors";
 import { hashSecret } from "./lib/passphrase";
 import { ensureStaffMode, todayFor } from "./services";
 import { sendStaffInvite } from "./email";
 import { appBaseUrl } from "./payments";
+import { syncSeats } from "./billing";
 import { fromLocal, addDays, monthRange, toLocal } from "./lib/time";
 import { clockFor, clockOutlook, setShiftFor } from "./attendance";
+import { computePay } from "./lib/payroll";
+import { money, toMinor } from "@shared/money";
 
 const INVITE_DAYS = 7;
 
@@ -32,6 +35,8 @@ export async function seatsFor(ownerId: number): Promise<{ seats: number; staffS
 export type StaffInput = {
   name?: string; email?: string | null; treats?: boolean; acceptNominated?: boolean; acceptFree?: boolean;
   menuIds?: number[] | null; role?: (typeof STAFF_ROLES)[number]; active?: boolean;
+  /** 給与（最小単位の整数と、歩合の%） */
+  hourlyWage?: number; nominationFee?: number; commissionPercent?: number;
 };
 
 async function checkEmail(email: string, selfId?: number) {
@@ -55,6 +60,7 @@ export async function inviteStaff(owner: Owner, member: Staff): Promise<{ path: 
   const token = randomBytes(18).toString("base64url");
   const path = `/staff/join?token=${token}`;
   await storage.updateStaff(owner.id, member.id, { inviteToken: token, inviteExpiresAt: new Date(Date.now() + INVITE_DAYS * 86400000) });
+  await syncSeats(owner.id);
   let email = "no_email";
   if (member.email) {
     try { email = await sendStaffInvite(owner, member.email, member.name, appBaseUrl() + path); }
@@ -72,8 +78,11 @@ export async function createStaffFor(owner: Owner, input: StaffInput, lang: Lang
   const member = await storage.createStaff({
     ownerId: owner.id, name, email, treats: input.treats ?? true, acceptNominated: input.acceptNominated ?? true,
     acceptFree: input.acceptFree ?? true, menuIds: await checkMenus(owner, input.menuIds ?? null), role: input.role ?? "staff", sortOrder: count,
+    hourlyWage: Math.max(0, Math.round(input.hourlyWage ?? 0)), nominationFee: Math.max(0, Math.round(input.nominationFee ?? 0)),
+    commissionPercent: Math.min(100, Math.max(0, Math.round(input.commissionPercent ?? 0))),
   });
   const invite = email ? await inviteStaff(owner, member) : null;
+  await syncSeats(owner.id);
   return { staff: storage.publicStaff((await storage.getStaff(owner.id, member.id)) ?? member), invite };
 }
 
@@ -84,10 +93,13 @@ export async function updateStaffFor(owner: Owner, member: Staff, input: StaffIn
   for (const k of ["treats", "acceptNominated", "acceptFree", "active"] as const) if (input[k] !== undefined) patch[k] = input[k];
   if (input.menuIds !== undefined) patch.menuIds = await checkMenus(owner, input.menuIds);
   if (input.role !== undefined) patch.role = input.role;
+  for (const k of ["hourlyWage", "nominationFee"] as const) if (input[k] !== undefined) { if (!(input[k]! >= 0)) throw new ApiError("validation"); patch[k] = Math.round(input[k]!); }
+  if (input.commissionPercent !== undefined) { if (!(input.commissionPercent >= 0 && input.commissionPercent <= 100)) throw new ApiError("validation"); patch.commissionPercent = Math.round(input.commissionPercent); }
   // 在籍をやめたら、ログインと招待も止める（料金の人数から外れる）
   if (input.active === false) Object.assign(patch, { inviteToken: null, passwordHash: null });
   const updated = (await storage.updateStaff(owner.id, member.id, patch)) ?? member;
   if (patch.name && patch.name !== member.name) await storage.renameStaffOnReservations(owner.id, member.id, patch.name);
+  await syncSeats(owner.id);
   return storage.publicStaff(updated);
 }
 
@@ -103,6 +115,37 @@ export async function timesheetFor(owner: Owner, month: string) {
     const days = new Set(mine.map((e) => toLocal(e.clockIn, owner.timezone).date)).size;
     return { staffId: s.id, name: s.name, minutes, hours: Math.round((minutes / 60) * 10) / 10, days, working: mine.some((e) => !e.clockOut) };
   });
+}
+
+/**
+ * 月の給与（オーナー本人の枠は除く）。勤務時間は打刻の合計（直した時刻で）、売り上げはその月に担当して終わった予約の料金。
+ * まだ確認していない打刻があれば件数を添える（確定させる前に確認してもらうため）
+ */
+export async function payrollFor(owner: Owner, month: string, lang: Language) {
+  const { from, to } = monthRange(`${month}-01`);
+  const tz = owner.timezone;
+  const start = fromLocal(from, "00:00", tz), end = fromLocal(addDays(to, 1), "00:00", tz);
+  const entries = await storage.listTimeEntries(owner.id, start, end);
+  const rows = await storage.listReservationsBetween(owner.id, start, end);
+  const now = Date.now();
+  const cur = owner.currency;
+  const m = (n: number) => money(n, cur, lang);
+  const people = (await storage.listStaff(owner.id)).filter((s) => !s.isOwner && (s.active || entries.some((e) => e.staffId === s.id)));
+  const staffPay = people.map((s) => {
+    const mine = entries.filter((e) => e.staffId === s.id);
+    const minutes = mine.reduce((a, e) => a + Math.max(0, Math.round(((e.clockOut?.getTime() ?? now) - e.clockIn.getTime()) / 60000)), 0);
+    const done = rows.filter((r) => r.staffId === s.id && r.status !== "no_show" && r.endAt.getTime() <= now);
+    const sales = done.reduce((a, r) => a + r.price, 0);
+    const nominations = done.filter((r) => r.nominated).length;
+    const p = computePay({ minutes, hourlyWage: s.hourlyWage, nominations, nominationFee: s.nominationFee, sales, commissionPercent: s.commissionPercent });
+    return {
+      staffId: s.id, name: s.name, hours: Math.round((minutes / 60) * 10) / 10, minutes, nominations, sales: m(sales),
+      rates: { hourlyWage: m(s.hourlyWage), nominationFee: m(s.nominationFee), commissionPercent: s.commissionPercent },
+      base: m(p.base), nominationPay: m(p.nominationPay), commission: m(p.commission), total: m(p.total), totalMinor: p.total,
+      unconfirmed: mine.filter((e) => !e.confirmedAt).length,
+    };
+  });
+  return { month, staff: staffPay, total: m(staffPay.reduce((a, x) => a + x.totalMinor, 0)), totalMinor: staffPay.reduce((a, x) => a + x.totalMinor, 0) };
 }
 
 // ---------- 画面の API ----------
@@ -128,6 +171,13 @@ const staffBody = z.object({
   name: z.string().max(100).optional(), email: z.string().max(200).nullable().optional(),
   treats: z.boolean().optional(), acceptNominated: z.boolean().optional(), acceptFree: z.boolean().optional(),
   menuIds: z.array(z.number().int()).nullable().optional(), role: z.enum(STAFF_ROLES).optional(), active: z.boolean().optional(),
+  // 画面からは普通の金額（円・ドル）で受け取り、最小単位に直す
+  hourlyWage: z.number().min(0).optional(), nominationFee: z.number().min(0).optional(), commissionPercent: z.number().int().min(0).max(100).optional(),
+});
+const toStaffInput = (owner: Owner, b: z.infer<typeof staffBody>): StaffInput => ({
+  ...b,
+  hourlyWage: b.hourlyWage !== undefined ? toMinor(b.hourlyWage, owner.currency) : undefined,
+  nominationFee: b.nominationFee !== undefined ? toMinor(b.nominationFee, owner.currency) : undefined,
 });
 
 function handle(fn: (req: Request, res: Response, lang: Language) => Promise<void>) {
@@ -147,21 +197,27 @@ export function registerStaffRoutes(app: Express) {
     const working = await Promise.all(all.map(async (s) => !!(await storage.openTimeEntry(s.id))));
     res.json({ ok: true, staff: all.map((s, i) => ({ ...storage.publicStaff(s), working: working[i] })), allowNomination: owner.allowNomination, ...(await seatsFor(owner.id)) });
   }));
-  app.post("/api/owner/staff", requireOwner, handle(async (req, res, lang) => {
+  app.post("/api/owner/staff", requireOwner, requireRegistered, handle(async (req, res, lang) => {
     const owner = (req as AuthedRequest).owner;
-    res.status(201).json({ ok: true, ...(await createStaffFor(owner, staffBody.parse(req.body), lang)) });
+    res.status(201).json({ ok: true, ...(await createStaffFor(owner, toStaffInput(owner, staffBody.parse(req.body)), lang)) });
   }));
-  app.patch("/api/owner/staff/:id", requireOwner, handle(async (req, res) => {
+  app.patch("/api/owner/staff/:id", requireOwner, requireRegistered, handle(async (req, res) => {
     const owner = (req as AuthedRequest).owner;
     const member = await storage.getStaff(owner.id, Number(req.params.id));
     if (!member) throw new ApiError("staff_not_found", 404);
-    res.json({ ok: true, staff: await updateStaffFor(owner, member, staffBody.parse(req.body)) });
+    res.json({ ok: true, staff: await updateStaffFor(owner, member, toStaffInput(owner, staffBody.parse(req.body))) });
   }));
-  app.post("/api/owner/staff/:id/invite", requireOwner, handle(async (req, res) => {
+  app.post("/api/owner/staff/:id/invite", requireOwner, requireRegistered, handle(async (req, res) => {
     const owner = (req as AuthedRequest).owner;
     const member = await storage.getStaff(owner.id, Number(req.params.id));
     if (!member || member.isOwner || !member.active) throw new ApiError("staff_not_found", 404);
     res.json({ ok: true, ...(await inviteStaff(owner, member)) });
+  }));
+  app.get("/api/owner/payroll", requireOwner, handle(async (req, res, lang) => {
+    const owner = (req as AuthedRequest).owner;
+    const month = String(req.query.month ?? todayFor(owner).slice(0, 7));
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new ApiError("validation");
+    res.json({ ok: true, ...(await payrollFor(owner, month, lang)) });
   }));
   app.get("/api/owner/timesheet", requireOwner, handle(async (req, res) => {
     const owner = (req as AuthedRequest).owner;
@@ -201,7 +257,7 @@ export function registerStaffRoutes(app: Express) {
     const open = look.open;
     const sheet = (await timesheetFor(shop, todayFor(shop).slice(0, 7))).find((x) => x.staffId === member.id);
     const today = todayFor(shop);
-    const plans = await storage.listShifts(member.id, today, addDays(today, 13));
+    const plans = await storage.listShifts(member.id, today, addDays(today, shop.planHorizonDays));
     res.json({
       ok: true, staff: storage.publicStaff(member), shopName: storage.shopName(shop, lang), date,
       reservations: mine.map((r) => {
@@ -209,9 +265,9 @@ export function registerStaffRoutes(app: Express) {
         return { id: v.id, time: v.time, endTime: v.endTime, customerName: v.customerName, menuName: v.menuName, staffName: v.staffName, status: v.status, notes: r.customer.notes || null };
       }),
       clockedInAt: open ? open.clockIn.toISOString() : null, clockedInTime: open ? toLocal(open.clockIn, shop.timezone).time : null,
-      // 次の打刻が予定どおりの幅のうちか（外れていても打刻はできる。オーナーの確認に回る）
-      outlook: { next: look.next, planned: look.planned, window: look.window, within: look.within, tolerance: look.tolerance },
-      today, plans: plans.map((p) => ({ date: p.date, planStart: p.planStart, planEnd: p.planEnd })),
+      // スタッフには今日の予定だけを見せる。予定どおりかの判定はオーナー側だけ（プレッシャーをかけない）
+      todayPlan: look.shift && look.shift.date === today ? { planStart: look.shift.planStart, planEnd: look.shift.planEnd } : null,
+      horizonDays: shop.planHorizonDays, today, plans: plans.map((p) => ({ date: p.date, planStart: p.planStart, planEnd: p.planEnd })),
       monthHours: sheet?.hours ?? 0, monthDays: sheet?.days ?? 0,
     });
   }));
@@ -220,7 +276,7 @@ export function registerStaffRoutes(app: Express) {
     const { action } = z.object({ action: z.enum(["in", "out"]) }).parse(req.body);
     const entry = await clockFor(shop, member, action);
     const after = await storage.openTimeEntry(member.id);
-    res.json({ ok: true, clockedInAt: after ? after.clockIn.toISOString() : null, onPlan: entry ? entry.flags.length === 0 : null });
+    res.json({ ok: true, clockedInAt: after ? after.clockIn.toISOString() : null, recorded: !!entry });
   }));
   // 勤務の予定（入り・上がり）を決める。打刻の前に決めておけば、その前後の打刻は「予定どおり」
   app.put("/api/staff/shifts", requireStaff, handle(async (req, res) => {

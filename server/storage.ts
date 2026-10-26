@@ -4,16 +4,16 @@
 import { and, asc, desc, eq, gte, lt, lte, ne, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
-  owners, customers, menus, reservations, blockedSlots, chatMessages, voiceSessions, emailLog, coupons, staff, timeEntries, shopGroups, shifts, attendanceEvents,
+  owners, customers, menus, reservations, blockedSlots, chatMessages, voiceSessions, emailLog, coupons, staff, timeEntries, shopGroups, shifts, attendanceEvents, ownerMemories, apiKeys, expenses, customerTickets, ticketTypes,
   type Owner, type PublicOwner, type Customer, type Menu, type InsertMenu, type Reservation, type InsertReservation,
-  type BlockedSlot, type Language, type Coupon, type Staff, type PublicStaff, type TimeEntry, type ShopGroup, type Shift, type AttendanceEvent,
+  type BlockedSlot, type Language, type Coupon, type Staff, type PublicStaff, type TimeEntry, type ShopGroup, type Shift, type AttendanceEvent, type OwnerMemory, type ApiKey, type Expense, type CustomerTicket, type TicketType,
 } from "@shared/schema";
 import { money, type Money } from "@shared/money";
 import { toLocal, fromLocal, addDays } from "./lib/time";
 
 export function publicOwner(o: Owner): PublicOwner {
-  const { passwordHash, passphraseHash, ...rest } = o;
-  return { ...rest, hasPassphrase: !!passphraseHash, hasPassword: !!passwordHash };
+  const { passwordHash, passphraseHash, deviceKeyHash: _d, ...rest } = o;
+  return { ...rest, hasPassphrase: !!passphraseHash, hasPassword: !!passwordHash, registered: !!o.email };
 }
 
 export function shopName(o: Pick<Owner, "shopNameJa" | "shopNameEn">, lang: Language): string {
@@ -27,6 +27,9 @@ export async function getOwner(id: number): Promise<Owner | undefined> {
 }
 export async function getOwnerByEmail(email: string): Promise<Owner | undefined> {
   return (await db.select().from(owners).where(eq(owners.email, email.toLowerCase().trim())))[0];
+}
+export async function getOwnerByDeviceKeyHash(hash: string): Promise<Owner | undefined> {
+  return (await db.select().from(owners).where(eq(owners.deviceKeyHash, hash)))[0];
 }
 export async function getOwnerBySlug(slug: string): Promise<Owner | undefined> {
   return (await db.select().from(owners).where(eq(owners.slug, slug)))[0];
@@ -84,10 +87,16 @@ export async function upsertCustomer(ownerId: number, name: string, phone: strin
   return (await db.insert(customers).values({ ownerId, name, phone, email: email || null }).returning())[0];
 }
 
+export async function listCustomers(ownerId: number): Promise<Customer[]> {
+  return db.select().from(customers).where(eq(customers.ownerId, ownerId)).orderBy(asc(customers.id));
+}
+export async function getCustomerByUnsubscribe(token: string): Promise<Customer | undefined> {
+  return (await db.select().from(customers).where(eq(customers.unsubscribeToken, token)))[0];
+}
 export async function getCustomer(ownerId: number, id: number): Promise<Customer | undefined> {
   return (await db.select().from(customers).where(and(eq(customers.ownerId, ownerId), eq(customers.id, id))))[0];
 }
-export async function updateCustomer(ownerId: number, id: number, patch: Partial<Pick<Customer, "name" | "phone" | "email" | "notes">>): Promise<Customer | undefined> {
+export async function updateCustomer(ownerId: number, id: number, patch: Partial<Pick<Customer, "name" | "phone" | "email" | "notes" | "followedUpAt" | "followupOptOut" | "unsubscribeToken">>): Promise<Customer | undefined> {
   return (await db.update(customers).set(patch).where(and(eq(customers.ownerId, ownerId), eq(customers.id, id))).returning())[0];
 }
 /** そのお客さんの予約すべて（取り消しも含む、古い順） */
@@ -233,6 +242,93 @@ export async function listTimeEntries(ownerId: number, from: Date, to: Date, sta
   const conds = [eq(timeEntries.ownerId, ownerId), gte(timeEntries.clockIn, from), lt(timeEntries.clockIn, to)];
   if (staffId) conds.push(eq(timeEntries.staffId, staffId));
   return db.select().from(timeEntries).where(and(...conds)).orderBy(asc(timeEntries.clockIn));
+}
+
+// ---------- 会話で覚えたこと ----------
+
+export async function listMemories(ownerId: number): Promise<OwnerMemory[]> {
+  return db.select().from(ownerMemories).where(eq(ownerMemories.ownerId, ownerId)).orderBy(asc(ownerMemories.id));
+}
+export async function addMemory(ownerId: number, content: string): Promise<OwnerMemory> {
+  return (await db.insert(ownerMemories).values({ ownerId, content }).returning())[0];
+}
+export async function deleteMemory(ownerId: number, id: number): Promise<boolean> {
+  return (await db.delete(ownerMemories).where(and(eq(ownerMemories.ownerId, ownerId), eq(ownerMemories.id, id))).returning()).length > 0;
+}
+
+// ---------- 券の種類 ----------
+
+export async function listTicketTypes(ownerId: number, activeOnly = false): Promise<TicketType[]> {
+  const where = activeOnly ? and(eq(ticketTypes.ownerId, ownerId), eq(ticketTypes.active, true)) : eq(ticketTypes.ownerId, ownerId);
+  return db.select().from(ticketTypes).where(where).orderBy(asc(ticketTypes.id));
+}
+export async function getTicketType(ownerId: number, id: number): Promise<TicketType | undefined> {
+  return (await db.select().from(ticketTypes).where(and(eq(ticketTypes.ownerId, ownerId), eq(ticketTypes.id, id))))[0];
+}
+export async function findTicketTypeByName(ownerId: number, name: string): Promise<TicketType | undefined> {
+  const n = name.normalize("NFKC").replace(/\s/g, "").toLowerCase();
+  const all = await listTicketTypes(ownerId, true);
+  const key = (t: TicketType) => t.name.normalize("NFKC").replace(/\s/g, "").toLowerCase();
+  return all.find((t) => key(t) === n) ?? all.find((t) => key(t).includes(n) || n.includes(key(t)));
+}
+export async function createTicketType(values: typeof ticketTypes.$inferInsert): Promise<TicketType> {
+  return (await db.insert(ticketTypes).values(values).returning())[0];
+}
+export async function updateTicketType(ownerId: number, id: number, patch: Partial<typeof ticketTypes.$inferInsert>): Promise<TicketType | undefined> {
+  return (await db.update(ticketTypes).set(patch).where(and(eq(ticketTypes.ownerId, ownerId), eq(ticketTypes.id, id))).returning())[0];
+}
+
+// ---------- 回数券・前払い ----------
+
+export async function listTickets(ownerId: number, customerId?: number): Promise<CustomerTicket[]> {
+  const conds = [eq(customerTickets.ownerId, ownerId)];
+  if (customerId) conds.push(eq(customerTickets.customerId, customerId));
+  return db.select().from(customerTickets).where(and(...conds)).orderBy(asc(customerTickets.id));
+}
+export async function listTicketsSold(ownerId: number, from: string, to: string): Promise<CustomerTicket[]> {
+  return db.select().from(customerTickets).where(and(eq(customerTickets.ownerId, ownerId), gte(customerTickets.soldDate, from), lte(customerTickets.soldDate, to))).orderBy(asc(customerTickets.soldDate));
+}
+export async function getTicketByToken(token: string): Promise<CustomerTicket | undefined> {
+  return (await db.select().from(customerTickets).where(eq(customerTickets.token, token)))[0];
+}
+export async function getTicket(ownerId: number, id: number): Promise<CustomerTicket | undefined> {
+  return (await db.select().from(customerTickets).where(and(eq(customerTickets.ownerId, ownerId), eq(customerTickets.id, id))))[0];
+}
+export async function createTicket(values: typeof customerTickets.$inferInsert): Promise<CustomerTicket> {
+  return (await db.insert(customerTickets).values(values).returning())[0];
+}
+export async function updateTicket(ownerId: number, id: number, patch: Partial<typeof customerTickets.$inferInsert>): Promise<CustomerTicket | undefined> {
+  return (await db.update(customerTickets).set(patch).where(and(eq(customerTickets.ownerId, ownerId), eq(customerTickets.id, id))).returning())[0];
+}
+
+// ---------- 経費 ----------
+
+export async function listExpenses(ownerId: number, from: string, to: string): Promise<Expense[]> {
+  return db.select().from(expenses).where(and(eq(expenses.ownerId, ownerId), gte(expenses.date, from), lte(expenses.date, to))).orderBy(asc(expenses.date), asc(expenses.id));
+}
+export async function createExpense(values: typeof expenses.$inferInsert): Promise<Expense> {
+  return (await db.insert(expenses).values(values).returning())[0];
+}
+export async function getExpense(ownerId: number, id: number): Promise<Expense | undefined> {
+  return (await db.select().from(expenses).where(and(eq(expenses.ownerId, ownerId), eq(expenses.id, id))))[0];
+}
+export async function deleteExpense(ownerId: number, id: number): Promise<boolean> {
+  return (await db.delete(expenses).where(and(eq(expenses.ownerId, ownerId), eq(expenses.id, id))).returning()).length > 0;
+}
+
+// ---------- API キー ----------
+
+export async function listApiKeys(ownerId: number): Promise<ApiKey[]> {
+  return db.select().from(apiKeys).where(eq(apiKeys.ownerId, ownerId)).orderBy(desc(apiKeys.id));
+}
+export async function createApiKey(values: typeof apiKeys.$inferInsert): Promise<ApiKey> {
+  return (await db.insert(apiKeys).values(values).returning())[0];
+}
+export async function getApiKeyByHash(keyHash: string): Promise<ApiKey | undefined> {
+  return (await db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash)))[0];
+}
+export async function updateApiKey(ownerId: number, id: number, patch: Partial<typeof apiKeys.$inferInsert>): Promise<ApiKey | undefined> {
+  return (await db.update(apiKeys).set(patch).where(and(eq(apiKeys.ownerId, ownerId), eq(apiKeys.id, id))).returning())[0];
 }
 
 // ---------- 店舗グループ ----------

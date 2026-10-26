@@ -4,6 +4,7 @@ import { useI18n } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import { Volume2 } from "lucide-react";
 import { isTouchDevice } from "@/lib/speech";
+import { SignalGlow } from "@/components/SignalGlow";
 
 export function Layout({ children, title, right }: { children: ReactNode; title?: string; right?: ReactNode }) {
   const { t, lang, setLang } = useI18n();
@@ -31,6 +32,7 @@ export function Layout({ children, title, right }: { children: ReactNode; title?
       <footer className="border-t-2 py-4 text-center text-sm text-muted-foreground">
         <Button variant="link" asChild size="sm"><Link href="/lookup">{t("customerLookup")}</Link></Button>
       </footer>
+      <SignalGlow />
     </div>
   );
 }

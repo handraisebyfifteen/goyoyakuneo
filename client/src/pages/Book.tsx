@@ -47,12 +47,13 @@ export default function Book({ slug }: { slug: string }) {
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<Created | null>(null);
   const [staffId, setStaffId] = useState<number | undefined>(undefined);
-  const [couponInput, setCouponInput] = useState("");
+  // クーポンの QR（予約ページのリンク ?coupon=コード）から来たら、コードを入れておく
+  const [couponInput, setCouponInput] = useState(() => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("coupon") ?? "" : ""));
   const [coupon, setCoupon] = useState<{ code: string; discount: Money; price: Money } | null>(null);
   const [couponError, setCouponError] = useState("");
 
-  async function applyCoupon(e: React.FormEvent) {
-    e.preventDefault();
+  async function applyCoupon(e?: React.FormEvent) {
+    e?.preventDefault();
     if (!menu || !couponInput.trim()) return;
     setCouponError("");
     try { setCoupon(await apiRequest<{ code: string; discount: Money; price: Money }>("GET", `/api/public/shop/${slug}/coupon?menuId=${menu.id}&code=${encodeURIComponent(couponInput)}&lang=${lang}`)); }
@@ -67,6 +68,8 @@ export default function Book({ slug }: { slug: string }) {
   useEffect(() => { if (shop && !shop.allowCardPayment) setPayment("onsite"); }, [shop]);
   // メニューを選び直したら、クーポンの額は計算し直してもらう
   useEffect(() => { setCoupon(null); setCouponError(""); }, [menu]);
+  // QR から来たクーポンは、確認の画面で自動で当てる
+  useEffect(() => { if (step === "confirm" && menu && couponInput && !coupon && !couponError) void applyCoupon(); }, [step, menu]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { document.getElementById("main")?.focus(); }, [step]);
 
   const dates = useMemo(() => {

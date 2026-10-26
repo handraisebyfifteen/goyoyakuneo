@@ -10,11 +10,12 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useI18n } from "@/lib/i18n";
 import { apiRequest, ApiRequestError, queryClient } from "@/lib/queryClient";
+import { DEFAULT_NOTICE, type PublicOwner, type NoticePrefs } from "@shared/schema";
 
 type Entry = { id: number; staffName: string; date: string; clockIn: string; clockOut: string | null; planStart: string | null; planEnd: string | null; onPlan: boolean; issues: string[]; corrected: boolean; original: { in: string; out: string | null } | null };
 type Data = { pending: Entry[]; events: { id: number; at: string; text: string }[]; tolerance: number };
 
-export function AttendanceCard() {
+export function AttendanceCard({ owner }: { owner: PublicOwner }) {
   const { t, lang } = useI18n();
   const key = `/api/owner/attendance?lang=${lang}`;
   const q = useQuery<Data>({ queryKey: [key] });
@@ -32,6 +33,10 @@ export function AttendanceCard() {
     setStatus(t("confirmedN", { n: r.confirmed }));
   });
 
+  const notice: NoticePrefs = owner.noticePrefs ?? DEFAULT_NOTICE;
+  const setting = (body: Record<string, unknown>) => run(async () => { await apiRequest("PATCH", "/api/owner/settings", body); await queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] }); });
+  const selectCls = "flex min-h-11 w-full rounded-md border-2 border-input bg-card px-3 py-2";
+
   const d = q.data;
   const closedOk = d?.pending.filter((e) => e.clockOut && e.onPlan).length ?? 0;
   return (
@@ -39,6 +44,30 @@ export function AttendanceCard() {
       <CardHeader><CardTitle>{t("attendanceTitle")}</CardTitle></CardHeader>
       <CardContent className="space-y-4">
         {d && <p className="text-sm text-muted-foreground">{t("attendanceHint", { n: d.tolerance })}</p>}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <Label htmlFor="att-tol">{t("toleranceLabel")}</Label>
+            <select id="att-tol" className={selectCls} value={owner.clockToleranceMinutes} onChange={(e) => setting({ clockToleranceMinutes: Number(e.target.value) })} data-testid="select-tolerance">
+              {[30, 15].map((n) => <option key={n} value={n}>{t("toleranceN", { n })}</option>)}
+            </select>
+          </div>
+          <div>
+            <Label htmlFor="att-horizon">{t("horizonLabel")}</Label>
+            <select id="att-horizon" className={selectCls} value={owner.planHorizonDays} onChange={(e) => setting({ planHorizonDays: Number(e.target.value) })} data-testid="select-horizon">
+              {[7, 14, 31, 62].map((n) => <option key={n} value={n}>{t(`horizon${n}`)}</option>)}
+            </select>
+          </div>
+          <div>
+            <Label htmlFor="att-notice">{t("noticeLabel")}</Label>
+            <select id="att-notice" className={selectCls} value={notice.attendance} onChange={(e) => setting({ noticePrefs: { ...notice, attendance: e.target.value } })} data-testid="select-notice">
+              <option value="all">{t("noticeAll")}</option><option value="checks">{t("noticeChecks")}</option><option value="off">{t("noticeOff")}</option>
+            </select>
+          </div>
+          <label className="flex items-center gap-3 self-end min-h-11">
+            <input type="checkbox" className="h-5 w-5" checked={notice.attendanceEmail} onChange={(e) => setting({ noticePrefs: { ...notice, attendanceEmail: e.target.checked } })} />
+            <span>{t("noticeEmail")}</span>
+          </label>
+        </div>
         {d?.pending.length ? (
           <ul className="divide-y">
             {d.pending.map((e) => (

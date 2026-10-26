@@ -1,6 +1,6 @@
 /**
  * スタッフ本人の画面：勤務の予定（入り・上がり）、出勤・退勤の打刻、予約の予定（staff は自分の分、manager は全員の分）。
- * 打刻の前に勤務の予定を決めておくと、その前後の打刻は「予定どおり」になる。外れた打刻もできるが、オーナーの確認に回る（そのことを先に伝える）。
+ * 予定どおりかどうかの判定はオーナー側だけに出す。スタッフには自分の予定と打刻ボタンだけを見せる（プレッシャーをかけない）。
  */
 import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
@@ -16,7 +16,7 @@ type Me = {
   staff: { name: string; role: string }; shopName: string; date: string;
   reservations: { id: number; time: string; endTime: string; customerName: string; menuName: string; staffName: string; status: string; notes: string | null }[];
   clockedInAt: string | null; clockedInTime: string | null; monthHours: number; monthDays: number;
-  outlook: { next: "in" | "out"; planned: string | null; window: string | null; within: boolean; tolerance: number };
+  todayPlan: { planStart: string; planEnd: string } | null; horizonDays: number;
   today: string; plans: { date: string; planStart: string; planEnd: string }[];
 };
 
@@ -64,24 +64,21 @@ export default function Staff() {
             <h2 id="h-clock" className="sr-only">{t("clockIn")}</h2>
             <p className="text-lg font-semibold" role="status" data-testid="text-clock-status">{d.clockedInAt ? t("clockedInSince", { time: since }) : t("notClockedIn")}</p>
             {d.clockedInAt
-              ? <Button size="lg" variant="destructive" className="w-full max-w-xs h-16 text-xl" onClick={() => clock("out")} data-testid="button-clock-out">{t("clockOut")}</Button>
+              ? <Button size="lg" variant="secondary" className="w-full max-w-xs h-16 text-xl" onClick={() => clock("out")} data-testid="button-clock-out">{t("clockOut")}</Button>
               : <Button size="lg" className="w-full max-w-xs h-16 text-xl" onClick={() => clock("in")} data-testid="button-clock-in">{t("clockIn")}</Button>}
-            {d.outlook.planned
-              ? <p>{t(d.outlook.next === "in" ? "plannedIn" : "plannedOut", { time: d.outlook.planned, window: d.outlook.window ?? "" })}</p>
-              : d.outlook.next === "in" && <p className="font-semibold">{t("noPlanToday")}</p>}
-            {d.outlook.planned && !d.outlook.within && <p className="font-semibold" data-testid="text-outside-window">{t("outsideWindow")}</p>}
+            {d.todayPlan && <p>{t("todayPlan", { start: d.todayPlan.planStart, end: d.todayPlan.planEnd })}</p>}
             <p className="text-sm text-muted-foreground">{t("monthWork", { days: d.monthDays, hours: d.monthHours })}</p>
             {error && <p role="alert" className="text-destructive">{error}</p>}
           </section>
 
           <section aria-labelledby="h-plan" className="space-y-3">
             <h2 id="h-plan" className="text-xl font-bold">{t("planTitle")}</h2>
-            <p className="text-sm text-muted-foreground">{t("planHint", { n: d.outlook.tolerance })}</p>
+            <p className="text-sm text-muted-foreground">{t("planHint", { days: d.horizonDays })}</p>
+            <NewPlan min={d.today} max={addDays(d.today, d.horizonDays)} onSave={savePlan} />
             <ul className="space-y-2">
-              {Array.from({ length: 7 }, (_, i) => addDays(d.today, i)).map((date) => {
-                const p = d.plans.find((x) => x.date === date);
-                return <PlanRow key={`${date}-${p?.planStart}-${p?.planEnd}`} date={date} label={i18nDay(date, d.today, t)} plan={p} onSave={(planStart, planEnd) => savePlan(date, planStart, planEnd)} />;
-              })}
+              {d.plans.map((p) => (
+                <PlanRow key={`${p.date}-${p.planStart}-${p.planEnd}`} date={p.date} label={i18nDay(p.date, d.today, t)} plan={p} onSave={(planStart, planEnd) => savePlan(p.date, planStart, planEnd)} />
+              ))}
             </ul>
           </section>
 
@@ -129,5 +126,24 @@ function PlanRow({ date, label, plan, onSave }: { date: string; label: string; p
         </div>
       </form>
     </li>
+  );
+}
+
+/** 新しい日の予定を入れる（今日から、お店が決めた日数先まで） */
+function NewPlan({ min, max, onSave }: { min: string; max: string; onSave: (date: string, s: string, e: string) => Promise<void> }) {
+  const { t } = useI18n();
+  const [date, setDate] = useState(min);
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  return (
+    <form className="rounded-lg border-2 p-3 space-y-2" aria-label={t("addPlan")} onSubmit={async (e) => { e.preventDefault(); if (date && start && end) { await onSave(date, start, end); setStart(""); setEnd(""); } }}>
+      <p className="font-semibold">{t("addPlan")}</p>
+      <div><Label htmlFor="np-date">{t("planDate")}</Label><Input id="np-date" type="date" min={min} max={max} value={date} onChange={(e) => setDate(e.target.value)} required /></div>
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
+        <div><Label htmlFor="np-start">{t("planStart")}</Label><Input id="np-start" type="time" step={300} value={start} onChange={(e) => setStart(e.target.value)} required className="w-full min-w-0 px-2" /></div>
+        <div><Label htmlFor="np-end">{t("planEnd")}</Label><Input id="np-end" type="time" step={300} value={end} onChange={(e) => setEnd(e.target.value)} required className="w-full min-w-0 px-2" /></div>
+        <Button type="submit" data-testid="button-add-plan">{t("save")}</Button>
+      </div>
+    </form>
   );
 }

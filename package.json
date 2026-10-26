@@ -23,6 +23,7 @@
     "drizzle-zod": "^0.5.1",
     "express": "^4.21.0",
     "express-session": "^1.18.0",
+    "jsqr": "^1.4.0",
     "lucide-react": "^0.453.0",
     "openai": "^4.68.0",
     "pg": "^8.13.0",

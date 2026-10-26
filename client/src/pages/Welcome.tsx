@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
@@ -6,11 +6,36 @@ import { useI18n } from "@/lib/i18n";
 import { useAnnounce } from "@/hooks/useAnnounce";
 import { useAuth } from "@/hooks/useAuth";
 import { hasVoicePrefs, isTouchDevice } from "@/lib/speech";
+import { deviceKey, resumeShop, startShop } from "@/lib/device";
+import { ApiRequestError } from "@/lib/queryClient";
 
 export default function Welcome() {
-  const { t, speechLang } = useI18n();
+  const { t, lang, speechLang } = useI18n();
   const { owner } = useAuth();
   const [, navigate] = useLocation();
+  // 登録しなくても始められる。この端末で始めたお店があれば、そのお店を開く
+  const [hasDeviceShop, setHasDeviceShop] = useState(() => !!deviceKey());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function begin() {
+    setBusy(true);
+    setError("");
+    try {
+      if (hasDeviceShop) {
+        if (await resumeShop()) return navigate("/admin");
+        // 鍵が使えなければ捨ててあるので、次に押したときは新しく始める
+        setHasDeviceShop(false);
+        setError(t("deviceShopMissing"));
+        return;
+      }
+      await startShop(lang);
+      navigate("/admin");
+    } catch (e) {
+      setError(e instanceof ApiRequestError ? e.message : t("error"));
+    } finally {
+      setBusy(false);
+    }
+  }
   // 初めて開いた人は、まず声の設定へ（声で進められる）。スマホはアプリが声を出さないので案内しない
   const firstRun = !hasVoicePrefs() && !isTouchDevice();
   useEffect(() => { if (firstRun) navigate("/voice?first=1", { replace: true }); }, [firstRun, navigate]);
@@ -28,8 +53,9 @@ export default function Welcome() {
             <Button size="lg" asChild><Link href="/admin" data-testid="link-admin">{t("adminTitle")}</Link></Button>
           ) : (
             <>
-              <Button size="lg" asChild><Link href="/login" data-testid="link-login">{t("ownerLogin")}</Link></Button>
-              <Button size="lg" variant="outline" asChild><Link href="/signup" data-testid="link-signup">{t("ownerSignup")}</Link></Button>
+              <Button size="lg" onClick={begin} disabled={busy} data-testid="button-start">{hasDeviceShop ? t("openDeviceShop") : t("startNow")}</Button>
+              <Button size="lg" variant="outline" asChild><Link href="/login" data-testid="link-login">{t("ownerLogin")}</Link></Button>
+              {error && <p role="alert" className="text-destructive">{error}</p>}
             </>
           )}
           <Button size="lg" variant="secondary" asChild><Link href="/lookup" data-testid="link-lookup">{t("customerLookup")}</Link></Button>

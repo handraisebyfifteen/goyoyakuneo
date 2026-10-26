@@ -79,3 +79,78 @@
   #qr-print, #qr-print * { visibility: visible; }
   #qr-print { position: absolute; left: 0; top: 0; border: none; }
 }
+
+/* 合図：画面のふちの光（少し見える人のため。lib/signal.ts と SignalGlow）。
+   色は補助で、光り方のリズムで区別する。点滅は1秒に3回まで */
+@property --sig-a { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --sig-k { syntax: "<number>"; inherits: false; initial-value: 1; }
+@layer base {
+  :root {
+    --sig-listen: 210 90% 44%;
+    --sig-think: 252 64% 58%;
+    --sig-speak: 41 100% 39%;
+    --sig-confirm: 21 87% 47%;
+    --sig-ok: 152 76% 31%;
+    --sig-ng: 350 85% 42%;
+    --sig-mono: 214 20% 21%;
+  }
+  .dark, [data-theme="dark"] {
+    --sig-listen: 208 100% 62%;
+    --sig-think: 254 100% 81%;
+    --sig-speak: 46 100% 65%;
+    --sig-confirm: 25 100% 62%;
+    --sig-ok: 147 69% 55%;
+    --sig-ng: 358 100% 68%;
+    --sig-mono: 0 0% 96%;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --sig-listen: 208 100% 62%;
+      --sig-think: 254 100% 81%;
+      --sig-speak: 46 100% 65%;
+      --sig-confirm: 25 100% 62%;
+      --sig-ok: 147 69% 55%;
+      --sig-ng: 358 100% 68%;
+      --sig-mono: 0 0% 96%;
+    }
+  }
+}
+
+.sig { position: fixed; inset: 0; pointer-events: none; z-index: 100; }
+.sig-layer { position: absolute; inset: 0; opacity: 0; --c: var(--sig-listen); }
+.sig-layer::before {
+  content: ""; position: absolute; inset: 0; opacity: var(--sig-b, 1);
+  box-shadow:
+    inset 0 0 0 calc(var(--sig-t, 14px) * var(--sig-k)) hsl(var(--c)),
+    inset 0 0 calc(var(--sig-t, 14px) * 3 * var(--sig-k)) calc(var(--sig-t, 14px) * var(--sig-k)) hsl(var(--c) / 0.65);
+}
+/* 考え中：光の帯がふちを回る */
+.sig-ring {
+  position: absolute; inset: 0; padding: calc(var(--sig-t, 14px) * 1.6); opacity: 0;
+  background: conic-gradient(from var(--sig-a), transparent 0deg 240deg, hsl(var(--c)) 330deg, transparent 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  filter: blur(3px);
+}
+.sig-layer[data-s="listen"]  { --c: var(--sig-listen); animation: sig-breathe 2.4s ease-in-out infinite; }
+.sig-layer[data-s="think"]   { --c: var(--sig-think); opacity: .3; }
+.sig-layer[data-s="think"] .sig-ring { opacity: var(--sig-b, 1); animation: sig-spin 2.2s linear infinite; }
+.sig-layer[data-s="speak"]   { --c: var(--sig-speak); animation: sig-sway .9s ease-in-out infinite; }
+.sig-layer[data-s="confirm"] { --c: var(--sig-confirm); animation: sig-knock 1.8s linear infinite; }
+.sig-layer[data-s="ok"]      { --c: var(--sig-ok); animation: sig-once 1.6s ease-out forwards; }
+.sig-layer[data-s="ok"]::before { animation: sig-swell 1.6s ease-out forwards; }
+.sig-layer[data-s="ng"]      { --c: var(--sig-ng); animation: sig-twice 2.4s ease-in-out forwards; }
+.sig-mono .sig-layer { --c: var(--sig-mono); }
+/* 動きを減らす：光り方は一定にして、色（か振動）で区別する */
+.sig-calm .sig-layer, .sig-calm .sig-layer::before { animation: none; }
+.sig-calm .sig-layer:not([data-s="idle"]) { opacity: .95; }
+.sig-calm .sig-layer .sig-ring { opacity: 0; animation: none; }
+
+@keyframes sig-breathe { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
+@keyframes sig-spin    { to { --sig-a: 360deg; } }
+@keyframes sig-sway    { 0%, 100% { opacity: .7; } 50% { opacity: .95; } }
+@keyframes sig-knock   { 0% { opacity: .2; } 8% { opacity: 1; } 18% { opacity: .2; } 28% { opacity: 1; } 38%, 100% { opacity: .2; } }
+@keyframes sig-once    { 0% { opacity: 0; } 15% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes sig-swell   { 0% { --sig-k: 1; } 25% { --sig-k: 2.4; } 100% { --sig-k: 1.2; } }
+@keyframes sig-twice   { 0% { opacity: 0; } 15% { opacity: 1; } 35% { opacity: .1; } 55% { opacity: 1; } 100% { opacity: 0; } }

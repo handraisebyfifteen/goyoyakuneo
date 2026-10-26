@@ -18,7 +18,8 @@ export type ErrorCode =
   | "unknown_tool" | "owner_declined" | "passphrase_locked" | "passphrase_missing" | "passphrase_rejected" | "ai_unavailable" | "blocked_slot_not_found" | "cash_unreadable" | "cash_not_found"
   | "end_or_menu_required" | "card_needs_menu" | "customer_not_found" | "no_show_too_early" | "not_confirmed" | "reschedule_too_late"
   | "coupon_invalid" | "coupon_expired" | "coupon_exists" | "coupon_needs_menu"
-  | "staff_not_found" | "staff_cannot_take" | "no_staff_for_menu" | "no_staff_available" | "staff_email_in_use" | "invite_invalid" | "forbidden" | "group_not_found" | "already_in_group";
+  | "staff_not_found" | "staff_cannot_take" | "no_staff_for_menu" | "no_staff_available" | "staff_email_in_use" | "invite_invalid" | "forbidden" | "group_not_found" | "already_in_group" | "plan_too_far" | "ticket_unusable" | "billing_not_ready" | "already_subscribed" | "scan_unknown" | "ticket_type_not_found"
+  | "registration_required" | "device_key_invalid" | "too_many_starts";
 
 type P = Record<string, string | number>;
 const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
@@ -63,6 +64,15 @@ const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
     forbidden: () => "この操作をする権限がありません",
     group_not_found: () => "その参加コードのグループは見つかりません",
     already_in_group: () => "すでにグループに入っています。先にグループを抜けてください",
+    plan_too_far: (p) => `勤務の予定は${p.days}日先まで入れられます`,
+    ticket_unusable: () => "このお客さんの使える回数券・前払いがありません（残りがない、期限切れ、コースが違う、など）",
+    billing_not_ready: () => "月額のお支払いの準備がまだできていません",
+    scan_unknown: () => "このお店の回数券やクーポンの QR コードではありません",
+    ticket_type_not_found: (p) => `その回数券の種類はありません${p.names ? `。今ある種類：${p.names}` : ""}`,
+    registration_required: () => "これは、お店を登録すると使えます。「登録する」と言うか、画面の「お店を登録する」から登録できます",
+    device_key_invalid: () => "この端末のお店が見つかりません。登録済みの方はログインしてください",
+    too_many_starts: () => "短い間にたくさん始めようとしています。しばらくしてから、もう一度お試しください",
+    already_subscribed: () => "すでにご契約中です",
     coupon_expired: () => "そのクーポンは期限が切れています",
     coupon_exists: (p) => `「${p.code}」というクーポンはすでにあります`,
     coupon_needs_menu: () => "クーポンはメニューのある予約にだけ使えます",
@@ -123,6 +133,15 @@ const M: Record<Language, Record<ErrorCode, (p: P) => string>> = {
     forbidden: () => "You do not have permission to do this.",
     group_not_found: () => "No group was found with that code.",
     already_in_group: () => "This shop is already in a group. Leave it first.",
+    plan_too_far: (p) => `Work plans can be set up to ${p.days} days ahead.`,
+    ticket_unusable: () => "This customer has no usable ticket or prepaid balance (none left, expired, or a different service).",
+    billing_not_ready: () => "Monthly billing is not set up yet.",
+    scan_unknown: () => "This is not a ticket or coupon QR code from this shop.",
+    ticket_type_not_found: (p) => `That ticket type does not exist.${p.names ? ` Current types: ${p.names}` : ""}`,
+    registration_required: () => 'This is available once you register your shop. Say "register", or use "Register your shop" on the screen.',
+    device_key_invalid: () => "The shop on this device was not found. If you have registered, please log in.",
+    too_many_starts: () => "Too many new shops were started in a short time. Please try again later.",
+    already_subscribed: () => "You already have a subscription.",
     coupon_expired: () => "That coupon has expired.",
     coupon_exists: (p) => `A coupon called "${p.code}" already exists.`,
     coupon_needs_menu: () => "Coupons only apply to bookings with a menu.",

@@ -11,12 +11,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useI18n } from "@/lib/i18n";
 import { apiRequest, ApiRequestError, queryClient } from "@/lib/queryClient";
 import type { PublicStaff } from "@shared/schema";
+import { toMajor } from "@shared/money";
 
 type Row = PublicStaff & { working: boolean };
 type MenuLite = { id: number; name: string; active: boolean };
 type Sheet = { staffId: number; name: string; hours: number; days: number; working: boolean };
 
-export function StaffCard({ menus, allowNomination }: { menus: MenuLite[]; allowNomination: boolean }) {
+export function StaffCard({ menus, allowNomination, currency }: { menus: MenuLite[]; allowNomination: boolean; currency: string }) {
   const { t, lang } = useI18n();
   const list = useQuery<{ staff: Row[]; seats: number }>({ queryKey: ["/api/owner/staff"] });
   const sheet = useQuery<{ staff: Sheet[] }>({ queryKey: ["/api/owner/timesheet"] });
@@ -117,6 +118,7 @@ export function StaffCard({ menus, allowNomination }: { menus: MenuLite[]; allow
                             </select>
                           </div>
                           <TextField id={`email-${s.id}`} type="email" label={t("staffEmail")} value={s.email ?? ""} onSave={(v) => patch(s.id, { email: v || null })} />
+                          <PayFields id={s.id} currency={currency} staff={s} onSave={(body) => patch(s.id, body)} />
                           <div className="flex flex-wrap gap-2">
                             {s.email && s.active && !s.canLogin && <Button size="sm" onClick={() => invite(s.id)} data-testid={`button-invite-${s.id}`}>{t("sendInvite")}</Button>}
                             <Button size="sm" variant={s.active ? "destructive" : "outline"} onClick={() => patch(s.id, { active: !s.active })}>{t(s.active ? "removeStaff" : "restoreStaff")}</Button>
@@ -148,6 +150,22 @@ export function StaffCard({ menus, allowNomination }: { menus: MenuLite[]; allow
         {error && <p role="alert" className="text-destructive font-semibold">{error}</p>}
       </CardContent>
     </Card>
+  );
+}
+
+/** 給与の設定（時給・指名料・歩合）。金額は普通の金額で入れる */
+function PayFields({ id, currency, staff, onSave }: { id: number; currency: string; staff: PublicStaff; onSave: (b: Record<string, number>) => void }) {
+  const { t } = useI18n();
+  const [hourly, setHourly] = useState(String(toMajor(staff.hourlyWage, currency)));
+  const [nom, setNom] = useState(String(toMajor(staff.nominationFee, currency)));
+  const [com, setCom] = useState(String(staff.commissionPercent));
+  return (
+    <form className="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto] items-end" onSubmit={(e) => { e.preventDefault(); onSave({ hourlyWage: Number(hourly) || 0, nominationFee: Number(nom) || 0, commissionPercent: Number(com) || 0 }); }}>
+      <div><Label htmlFor={`hw-${id}`}>{t("payHourly")}</Label><Input id={`hw-${id}`} type="number" min="0" step="any" value={hourly} onChange={(e) => setHourly(e.target.value)} /></div>
+      <div><Label htmlFor={`nf-${id}`}>{t("payNomination")}</Label><Input id={`nf-${id}`} type="number" min="0" step="any" value={nom} onChange={(e) => setNom(e.target.value)} /></div>
+      <div><Label htmlFor={`cp-${id}`}>{t("payCommission")}</Label><Input id={`cp-${id}`} type="number" min="0" max="100" value={com} onChange={(e) => setCom(e.target.value)} /></div>
+      <Button type="submit" variant="outline" size="sm">{t("paySave")}</Button>
+    </form>
   );
 }
 

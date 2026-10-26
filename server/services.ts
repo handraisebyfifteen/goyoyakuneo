@@ -206,6 +206,11 @@ export async function createReservationFor(owner: Owner, input: CreateReservatio
 
 export async function cancelReservationFor(owner: Owner, row: storage.ReservationRow, lang: Language, by: "owner" | "customer" = "owner") {
   if (row.status === "cancelled") throw new ApiError("already_cancelled");
+  // 回数券・前払いで払っていたら、使った分を戻す
+  if (row.paymentStatus === "ticket" && row.ticketId) {
+    const t = await storage.getTicket(owner.id, row.ticketId);
+    if (t) await storage.updateTicket(owner.id, t.id, { remaining: t.remaining + row.ticketUsed });
+  }
   const wasPaid = row.paymentStatus === "paid";
   const updated = await storage.updateReservation(owner.id, row.id, { status: "cancelled", cancelledAt: new Date(), cancelledBy: by });
   const eligible = wasPaid ? refundEligible(row.startAt, owner.freeCancelHoursBefore) : null;
@@ -268,10 +273,12 @@ export async function salesSummaryFor(owner: Owner, from: string, to: string, la
   // 無断キャンセルは未払いに数えない（別に件数を出す）
   const waiting = rows.filter((r) => live(r) && r.status !== "no_show" && (r.paymentStatus === "unpaid" || r.paymentStatus === "onsite_pending"));
   const refundPending = rows.filter((r) => r.status === "cancelled" && r.paymentStatus === "paid");
+  // 回数券・前払いは、売った日の売り上げ
+  const ticketSales = (await storage.listTicketsSold(owner.id, from, to)).reduce((a, t) => a + t.price, 0);
   return {
     from, to, currency: cur,
-    total: money(card + onsite, cur, lang), cardTotal: money(card, cur, lang), onsiteTotal: money(onsite, cur, lang),
-    paidCount: rows.filter((r) => live(r) && (r.paymentStatus === "paid" || r.paymentStatus === "onsite_received")).length,
+    total: money(card + onsite + ticketSales, cur, lang), cardTotal: money(card, cur, lang), onsiteTotal: money(onsite, cur, lang), ticketTotal: money(ticketSales, cur, lang),
+    paidCount: rows.filter((r) => live(r) && (r.paymentStatus === "paid" || r.paymentStatus === "onsite_received" || r.paymentStatus === "ticket")).length,
     waitingCount: waiting.length, waitingAmount: money(waiting.reduce((a, r) => a + r.price, 0), cur, lang),
     cancelledCount: rows.filter((r) => r.status === "cancelled").length,
     noShowCount: rows.filter((r) => r.status === "no_show").length,

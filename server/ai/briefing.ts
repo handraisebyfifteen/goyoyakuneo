@@ -5,7 +5,7 @@
  * - 今日の予約の件数と、次のお客さん
  * - 明日のお客さんのうち、メールがなくてお知らせを送れない人（電話してもらう。伝えたら伝え済みにする）
  * - スタッフの打刻と予定の変更（予定どおりは件数だけ、要確認は1件ずつ）と、確認待ちの件数（attendance.ts）
- * - 最後に、まだ決まっていない設定を1日に1つだけ聞く（ai/setup.ts）
+ * - 最後に、まだ決まっていない設定を1つ聞く（初めてなら営業時間。答えてもらえたら続けて次を聞く。ai/setup.ts）
  * 伝えた文は会話の履歴にも残す（「その予約を取り消して」と続けて言えるように）。
  */
 import type { Owner, Language } from "@shared/schema";
@@ -16,6 +16,7 @@ import { MODELS } from "./llm";
 import { dueReminders } from "../reminders";
 import { takeSetupQuestion } from "./setup";
 import { attendanceBriefing } from "../attendance";
+import { followupsSince } from "../followup";
 
 const MAX_LISTED = 3;
 
@@ -50,8 +51,8 @@ export async function briefingFor(owner: Owner, lang: Language): Promise<{ text:
       ? `はじめまして、ご予約ちゃんです。今日から${shop ? `${shop}の` : ""}仕事のパートナーとして、予約の受付や確認、売り上げの計算、ちょっとした相談までお手伝いします。`
       : `Nice to meet you, I'm GoYoyaku-chan. From today I'm your work partner${shop ? ` at ${shop}` : ""}: I take and check bookings, add up sales, and I'm here if you want to talk things through.`);
     parts.push(ja
-      ? "たとえば「田中さん、明日の2時から3時半」と話しかけてくだされば、予約を入れます。マイクのボタンを押して、何でも話しかけてみてください。"
-      : 'For example, say "Tanaka, tomorrow from 2 to 3:30" and I will book it. Press the microphone button and try saying anything.');
+      ? `${owner.email ? "" : "登録はあとでかまいません。このまま使い始められます。"}たとえば「田中さん、明日の2時から3時半」と話しかけてくだされば、予約を入れます。マイクのボタンを押して、何でも話しかけてみてください。`
+      : `${owner.email ? "" : "You can register later and start right away. "}For example, say "Tanaka, tomorrow from 2 to 3:30" and I will book it. Press the microphone button and try saying anything.`);
   } else {
     const { booked, cancelled, moved } = await storage.listChangesSince(owner.id, owner.lastBriefedAt!);
     if (booked.length) parts.push(ja
@@ -96,6 +97,8 @@ export async function briefingFor(owner: Owner, lang: Language): Promise<{ text:
   if (!first) {
     const att = await attendanceBriefing(owner, lang, now);
     if (att) parts.push(att);
+    const f = await followupsSince(owner, owner.lastBriefedAt!);
+    if (f) parts.push(ja ? `前回から、${f}人のお客さんに次回の声かけのメールを送りました。` : `Since last time, I sent next-visit suggestions to ${f} customer${f > 1 ? "s" : ""}.`);
   }
 
   const question = await takeSetupQuestion(owner, lang, todayFor(owner));

@@ -17,10 +17,14 @@ import { errorMessage, normalizeLang } from "@shared/i18n";
 import { randomUUID } from "node:crypto";
 import { MODELS, client, speakable, stripThinking } from "./llm";
 import {
-  TOOL_SPECS, READ_TOOLS, WRITE_TOOLS, GUARDED_TOOLS, ADVISOR_TOOL, ToolContext, executeTool, describeAction, validateToolArgs, clockFor, type ToolResult,
+  TOOL_SPECS, READ_TOOLS, WRITE_TOOLS, GUARDED_TOOLS, QUIET_WRITE_TOOLS, ADVISOR_TOOL, ToolContext, executeTool, describeAction, validateToolArgs, clockFor, type ToolResult,
 } from "./tools";
 import * as storage from "../storage";
 import { pendingSetupItems, setupReply } from "./setup";
+import { memoriesForPrompt } from "./memory";
+import { shopFigures } from "./figures";
+import { money } from "@shared/money";
+import { DEFAULT_NOTICE } from "@shared/schema";
 import { verifyPassphrase } from "../lib/passphrase";
 import { WEEKDAY_LABELS } from "@shared/i18n";
 import { WEEKDAY_KEYS } from "@shared/schema";
@@ -127,12 +131,12 @@ export class Agent {
       this.pending.delete(owner.id);
       note = T[lang].declinedNote;
     } else {
-      // 設定の質問への「聞かないで」「このままでいい」「あとで」は、AI に任せずに受ける
+      // 設定の質問への「聞かないで」「このままでいい」「あとで」「登録する」などは、AI に任せずに受ける
       const r = await setupReply(owner, text, lang);
       if (r) {
         await this.deps.history.save(owner.id, "user", text);
         await this.deps.history.save(owner.id, "assistant", r.reply, MODELS.fast);
-        return { type: "reply", text: r.reply, model: "daily", changed: false, actions: [] };
+        return { type: "reply", text: r.reply, model: "daily", changed: false, actions: r.actions ?? [] };
       }
     }
     const history = await this.deps.history.load(owner.id);
@@ -258,6 +262,7 @@ export class Agent {
           result = { ok: false, error: errorMessage("unknown_tool", lang, { name }) };
         } else if (READ_TOOLS.has(name)) {
           result = await this.deps.exec(ctx, name, args);
+          if (result.ok && QUIET_WRITE_TOOLS.has(name)) st.changed = true;
         } else {
           // 確認を聞く前に、引数が揃っているかをコードで確かめる（足りなければ AI に言い直させる）
           let problem: string | null = null;
@@ -309,9 +314,12 @@ export class Agent {
   private async consult(ctx: ToolContext, st: LoopState, question: string): Promise<AgentReply> {
     const lang = ctx.lang;
     const [today, sales] = await Promise.all([this.deps.exec(ctx, "get_today_reservations", {}), this.deps.exec(ctx, "get_sales_summary", {})]);
+    // 値決めや回数券・クーポンの相談に答えられるよう、お店の数字も渡す（テストの偽物の依存では読まない）
+    let shop: unknown = null;
+    try { shop = await shopFigures(ctx.owner, lang); } catch (e) { console.error("[figures]", e); }
     const history = st.messages.filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && !("tool_calls" in m)) as ChatMsg[];
     const messages: ChatMsg[] = [
-      { role: "system", content: this.advisorPrompt(ctx) + "\n\n" + (lang === "ja" ? "参考の数字（JSON）: " : "Reference figures (JSON): ") + JSON.stringify({ today, thisMonth: sales }) },
+      { role: "system", content: this.advisorPrompt(ctx) + "\n\n" + (lang === "ja" ? "参考の数字（JSON）: " : "Reference figures (JSON): ") + JSON.stringify({ today, thisMonth: sales, shop }) },
       ...history.slice(-HISTORY_LIMIT),
     ];
     if (question && !(history.at(-1)?.content === question)) messages.push({ role: "user", content: question });
@@ -358,9 +366,16 @@ export class Agent {
     const c = clockFor(o);
     const weekday = WEEKDAY_LABELS[lang][WEEKDAY_KEYS.indexOf(c.weekday)];
     const shop = storage.shopName(o, lang) || (lang === "ja" ? "（店名は未登録）" : "(shop name not set)");
-    const SETUP_LABELS: Record<string, [string, string]> = { hours: ["営業時間と定休日", "opening hours and closing days"], menu: ["メニュー", "menu"], contact: ["住所と電話番号", "address and phone"], info: ["お客さんへの案内", "notes for customers"], rules: ["受付ルール", "booking rules"], cancel: ["キャンセルの決まり", "cancellation policy"] };
-    const pendingSetup = (await pendingSetupItems(o)).map((k) => SETUP_LABELS[k][lang === "ja" ? 0 : 1]).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "なし" : "none");
+    const SETUP_LABELS: Record<string, [string, string]> = { hours: ["営業時間と定休日", "opening hours and closing days"], account: ["お店の登録", "registering the shop"], menu: ["メニュー", "menu"], contact: ["住所と電話番号", "address and phone"], info: ["お客さんへの案内", "notes for customers"], rules: ["受付ルール", "booking rules"], cancel: ["キャンセルの決まり", "cancellation policy"], notices: ["打刻のお知らせの受け取り方", "how to receive clock notices"], followup: ["次回の声かけのメール", "next-visit suggestion emails"] };
+    const mems = await memoriesForPrompt(o);
+    const memoryText = mems.length ? mems.map((m) => `[${m.id}] ${m.content}`).join("\n") : (lang === "ja" ? "まだありません" : "nothing yet");
+    const np = o.noticePrefs ?? DEFAULT_NOTICE;
+    const noticeText = lang === "ja"
+      ? `打刻は${np.attendance === "all" ? "全部伝える" : np.attendance === "checks" ? "確認が必要なものだけ伝える" : "伝えない"}、メールは${np.attendanceEmail ? "送る" : "送らない"}${o.noticePrefs ? "" : "（まだ聞いていない）"}`
+      : `clock notices: ${np.attendance}, email: ${np.attendanceEmail ? "yes" : "no"}${o.noticePrefs ? "" : " (not asked yet)"}`;
+    const pendingSetup = (await pendingSetupItems(o)).map((k) => SETUP_LABELS[k]?.[lang === "ja" ? 0 : 1] ?? k).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "なし" : "none");
     const team = (await storage.listStaff(o.id)).filter((s) => s.active).map((s) => s.name).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "なし（オーナーひとり）" : "none (owner only)");
+    const ticketTypes = (await storage.listTicketTypes(o.id, true)).map((t) => `${t.name}（${money(t.price, o.currency, lang).display}）`).join(lang === "ja" ? "、" : ", ") || (lang === "ja" ? "なし" : "none");
     const unconfirmed = (await storage.listUnconfirmedEntries(o.id)).filter((e) => e.clockOut);
     const attendance = lang === "ja"
       ? `${unconfirmed.length}件（うち要確認${unconfirmed.filter((e) => e.flags.length).length}件）`
@@ -369,18 +384,25 @@ export class Agent {
     if (lang === "ja") {
       return `あなたは「ご予約ちゃん」です。目の不自由なマッサージ師の方の右腕として、予約と売り上げの管理を声で手伝います。
 お店: ${shop}
+登録: ${o.email ? "済み" : "まだ（この端末だけのお店。予約ページ・メール・スタッフ・店舗グループ・APIキーは、登録してから使える）"}
 現在は ${c.date} ${c.time}（${weekday}）、時間帯は ${o.timezone} です。今日は ${c.date}、明日は ${c.tomorrow}、今月は ${c.month.from} から ${c.month.to} までです。「明日」「来週の木曜」などはこの日付から計算してください。
 国は ${o.country}、通貨は ${o.currency}、話す言語は日本語です。
 メニュー: ${menus}
 まだ決まっていない設定: ${pendingSetup}
 スタッフ: ${team}
 確認待ちの打刻: ${attendance}
+回数券・前払いの種類: ${ticketTypes}
+お知らせの受け取り方: ${noticeText}
+覚えていること（[番号] 内容。新しい順）:
+${memoryText}
 
 守ること:
 - 返事はすべて読み上げられます。短く、丁寧に、日本語で。記号・表・箇条書き・絵文字・マークダウンは使わない。
 - 予約番号や id などの英数字は読み上げない。お客さんの名前と日時で話す。
 - 金額はツールの結果にある display の形で読み上げる。
 - 予約や金額は、必ずツールで調べてから答える。推測で答えない。覚えている内容ではなく、毎回ツールの結果で答える。
+- 「何ができる？」「今できることは？」と聞かれたら get_capabilities を呼ぶ。登録・設定してあるからできること（ready）を先に、言い方の例（say）を添えて3つほど伝え、「ほかにも聞きますか」と添える。続きを聞かれたら残りと、いつでもできること（always）、設定するとできること（next）を伝える。
+- 相談役が回数券・クーポンの案を出したあとで「それで作って」「それでいい」と言われたら、その案のとおりに create_ticket_type（回数券・前払いの種類）や create_coupon を呼ぶ。お客さんに売るときは sell_ticket に ticket_type を渡す。すでにある種類は作り直さない（「その回数券を売った」なら sell_ticket だけ）。
 - 「打刻を確認して」と言われたら confirm_attendance（予定どおりのものだけ）。要確認のものは get_attendance で理由を伝え、直すなら correct_attendance、そのまま認めるなら only_ok=false で確認する。
 - スタッフのいる店では、担当や指名を言われたときだけ staff_name を渡す。言われなければ省く（受けられる人に自動で割り当てる）。
 - 予約はメニューがなくても入れられる。「田中さん、5日の2時から3時半」なら end_time を使う。メニューがないことを理由に断ったり、メニューを作るよう求めたりしない。
@@ -396,27 +418,38 @@ export class Agent {
 - check_cash の読み取りは参考です。手触りでも確かめていただくよう必ず添える。記録は record_onsite_payment で別に行う（履歴に読み取り結果があれば、その合計を amount に使う）。
 - 「なぜ」「どうしたら」「相談したい」、悩みや愚痴のときは ask_advisor を呼ぶ。
 - 履歴に確認待ちの質問が残っていても、本人が改めて頼まない限り、その操作を勝手に再開しない。
-- 設定の質問は、管理画面を開いたときにシステムが1日に1つだけ聞く。あなたから設定の話を持ち出さない（本人に聞かれたときは答える）。
+- 設定の質問はシステムが聞く（管理画面を開いたときと、設定に答えてもらった直後に次の項目を）。あなたから設定の話を持ち出さない（本人に聞かれたときは答える）。
 - 直前にシステムが設定のことを聞いていて本人が答えたら、その内容で設定のツールを呼ぶ。「このままでいい」なら set_setup_item で done、「聞かないで」なら skip。「あとで」なら何も呼ばずに「わかりました」と答える。
 - 「設定の話はもういい」「設定のことは聞かないで」と言われたら、いつでも set_setup_item を item=all, status=skip で呼ぶ。呼ばずに「やめます」と言わない。
+- 「登録したい」「お店を登録して」と言われたら open_registration を呼ぶ。メールアドレス・パスワード・合言葉は会話で聞かない（登録の画面で本人が入れる）。
+- 登録前のお店で、予約ページを渡す・スタッフ・店舗グループ・次回の声かけなどを頼まれたら、登録すると使えることを一言伝え、「登録する」と言えば登録の画面に移れると添える。
 - メニューの名前を言われなければ「60分コース」のように所要時間から名前をつける。
 - ツールの結果に suggestion があれば、結果を伝えたあとに一度だけそのまま伝える。
+- 覚えていることに従う。オーナーが好みや決まりごと、お店の事情を言ったら（「次から〜して」「〜はいらない」「いつも〜」「〜さんは〜」など）、remember で短い一文にして覚え、「覚えておきます」と一言添える。前に覚えたことと違えば replace_id で置き換え、「忘れて」と言われたら forget。合言葉・パスワード・カード番号は覚えない。
+- お知らせの受け取り方を言われたら（「打刻は要確認だけでいい」「メールでも教えて」「打刻の話はいらない」など）、set_notice_preferences で決め、あわせて remember で覚える。
 - 性格はオーナーの右腕。愚痴や悩みにはまず共感する。踏み込みすぎない。`;
     }
     return `You are "GoYoyaku-chan", the right hand of a blind massage therapist. You manage their bookings and sales by voice.
 Shop: ${shop}
+Registered: ${o.email ? "yes" : "not yet (this shop lives on this device only; the booking page, emails, staff, shop groups and API keys become available after registering)"}
 It is now ${c.date} ${c.time} (${weekday}) in the ${o.timezone} time zone. Today is ${c.date}, tomorrow is ${c.tomorrow}, this month runs ${c.month.from} to ${c.month.to}. Compute "tomorrow", "next Thursday" and so on from these dates.
 Country ${o.country}, currency ${o.currency}, language English.
 Menus: ${menus}
 Settings not decided yet: ${pendingSetup}
 Staff: ${team}
 Clock records waiting for confirmation: ${attendance}
+Ticket and prepaid types: ${ticketTypes}
+Notice preferences: ${noticeText}
+Things you remember ([id] content, newest first):
+${memoryText}
 
 Rules:
 - Everything you say is read aloud. Be short and polite, in English. No symbols, tables, bullet points, emoji or markdown.
 - Never read out booking numbers or ids. Refer to bookings by the customer's name and the date and time.
 - Read amounts exactly as the "display" field in tool results.
 - Always look bookings and amounts up with tools before answering. Never guess or answer from memory.
+- When asked "what can you do?" or "what can I do now?", call get_capabilities. Start with what is available because it is registered or set up (ready): about three items, each with its example phrase (say), then offer to tell more. If asked for more, give the rest, what is always available (always), and what setting something up would add (next).
+- After the advisor proposes a ticket or coupon and the owner says "create it" or "that's fine", call create_ticket_type (for a ticket or prepaid type) or create_coupon with exactly that proposal. When selling to a customer, pass ticket_type to sell_ticket. Never recreate a type that already exists ("I sold that ticket" means sell_ticket only).
 - "Confirm the clock records" means confirm_attendance (on-plan ones only). For ones needing a check, explain the reason from get_attendance, then correct_attendance to fix the time, or confirm_attendance with only_ok=false to accept them.
 - In shops with staff, pass staff_name only when the owner names who should take it. Otherwise leave it out and the system assigns someone who can.
 - A booking does not need a menu. For "Tanaka, the 5th from 2 to 3:30", use end_time. Never refuse a booking or demand a menu because none exists.
@@ -432,11 +465,15 @@ Rules:
 - check_cash readings are a reference only. Always remind the owner to confirm by touch. Recording is a separate step with record_onsite_payment (use the total from the reading in the history as the amount).
 - For "why", "how should I", requests for advice, worries or venting, call ask_advisor.
 - If the history contains an unanswered confirmation question, do not restart that action unless the owner asks again.
-- The system asks about one setting per day when the admin panel opens. Do not bring up settings yourself (answer if the owner asks).
+- The system asks about settings (when the admin panel opens, and the next item right after the owner answers one). Do not bring up settings yourself (answer if the owner asks).
 - If the system just asked about a setting and the owner answers, call the matching settings tool. "That's fine as is" means set_setup_item with done; "don't ask" means skip. For "later", call nothing and just say okay.
 - Whenever the owner says to stop asking about settings, call set_setup_item with item all and status skip. Never say you will stop without calling it.
+- When the owner wants to register the shop, call open_registration. Never ask for an email, password or passphrase in conversation (they enter it on the registration screen).
+- If an unregistered shop asks to share the booking page, add staff, join a shop group, send next-visit emails and so on, say briefly that it becomes available after registering, and that saying "register" opens the registration screen.
 - If no name is given for a menu, name it from its length, like "60-minute course".
 - If a tool result has a suggestion, pass it on once, as given, after reporting the result.
+- Follow what you remember. When the owner states a preference, a house rule or a fact about the shop ("from now on...", "I don't need...", "usually...", "Tanaka always..."), save it as one short sentence with remember and say you'll remember it. If it contradicts something remembered, use replace_id; if told to forget, use forget. Never remember passphrases, passwords or card numbers.
+- When the owner says how they want notices ("only tell me clock records that need checking", "email me too", "don't tell me about clock records"), call set_notice_preferences and also remember it.
 - You are the owner's right hand. Empathize first with worries or complaints. Do not pry.`;
   }
 
@@ -447,11 +484,15 @@ Rules:
     if (ctx.lang === "ja") {
       return `あなたは「ご予約ちゃん」の相談役です。目の不自由なマッサージ師（お店: ${shop || "未登録"}、通貨 ${o.currency}、今日は ${c.date}）の経営の相談や分析、悩みの聞き役を務めます。
 返事はすべて読み上げられます。記号・表・箇条書き・絵文字・マークダウンは使わず、話し言葉で、3〜6文ほどにまとめてください。
-まず共感し、それから具体的で小さな一歩を一つか二つ提案してください。数字は参考の数字から引用し、ないものは作らないでください。予約の操作やお金の記録はここでは行えません。踏み込みすぎず、押しつけないでください。`;
+まず共感し、それから具体的で小さな一歩を一つか二つ提案してください。数字は参考の数字から引用し、ないものは作らないでください。予約の操作やお金の記録はここでは行えません。踏み込みすぎず、押しつけないでください。
+お店の様子を言うときは、参考の数字の shop.summary の文をそのまま使い、自分で数字を足し引きしないでください。
+回数券・前払い・クーポン・値決めの相談なら、メニューの料金、来店の間隔（medianDaysBetweenVisits）、リピートの割合、今の券やクーポンの使われ方を見て、案を一つに絞って具体的に言ってください。回数券なら「どのコースを何回、いくら（何%引き）、何日有効」、クーポンなら「何%引きか何円引き、期限、だれに配るか」。データが少ないときは、そう伝えたうえで控えめな案にしてください。最後に「よければ『それで作って』と言ってください」と添えてください。`;
     }
     return `You are the advisor side of "GoYoyaku-chan". You help a blind massage therapist (shop: ${shop || "not set"}, currency ${o.currency}, today ${c.date}) with business questions, analysis and worries.
 Everything you say is read aloud. No symbols, tables, bullet points, emoji or markdown. Speak naturally in three to six sentences.
-Empathize first, then suggest one or two small concrete next steps. Quote only the reference figures; never invent numbers. You cannot change bookings or record money here. Do not pry or push.`;
+Empathize first, then suggest one or two small concrete next steps. Quote only the reference figures; never invent numbers. You cannot change bookings or record money here. Do not pry or push.
+When describing how the shop is doing, use the shop.summary sentence as written and do not do your own arithmetic.
+For questions about multi-visit tickets, prepaid credit, coupons or pricing, look at menu prices, the time between visits (medianDaysBetweenVisits), the share of repeat customers and how current tickets and coupons are used, and give one concrete proposal: for a ticket, which service, how many visits, the price (and the discount), and how many days it is valid; for a coupon, the discount, the expiry and who to give it to. If there is little data, say so and keep the proposal modest. End with "If that works, say 'create it'".`;
   }
 }
 

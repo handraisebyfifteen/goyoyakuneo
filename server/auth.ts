@@ -1,6 +1,8 @@
 /**
  * ログイン。パスワードでも合言葉でも入れる（オーナーの設定による）。
  * セッションは PostgreSQL に保存。ハッシュは scrypt。
+ * 登録しなくても始められる：「はじめる」でこの端末だけのお店を作り、入るための鍵を端末に保存する。
+ * あとで登録すると、同じお店にメールとログインの方法がつき、鍵は消える（記録はそのまま）。
  */
 import type { Express, Request, Response, NextFunction } from "express";
 import session from "express-session";
@@ -12,7 +14,7 @@ import { hashSecret, verifySecret, hashPassphrase, verifyPassphrase, passphraseL
 import { ApiError, sendError } from "./errors";
 import { LOGIN_METHODS, LANGUAGES, DEFAULT_HOURS, type Owner } from "@shared/schema";
 import { normalizeLang } from "@shared/i18n";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { isValidTimeZone } from "./lib/time";
 
 // 端末の時間帯から国と通貨を決める（登録のときに聞かないため）。知らない時間帯なら言語で決める
@@ -50,6 +52,13 @@ export function setupSession(app: Express) {
 
 export type AuthedRequest = Request & { owner: Owner };
 
+/** 外に出るもの（予約ページ・スタッフ・店舗グループ・APIキー・ご利用料金）は、登録してから。requireOwner のあとに置く */
+export function requireRegistered(req: Request, res: Response, next: NextFunction) {
+  const owner = (req as AuthedRequest).owner;
+  if (!owner.email) return sendError(res, normalizeLang(owner.language), new ApiError("registration_required", 403));
+  next();
+}
+
 export function requireOwner(req: Request, res: Response, next: NextFunction) {
   const id = req.session.ownerId;
   if (!id) return sendError(res, normalizeLang(req.query.lang), new ApiError("unauthorized", 401));
@@ -78,8 +87,26 @@ const loginSchema = z.object({
   secret: z.string().min(1).max(200),
 });
 
+const startSchema = z.object({
+  language: z.enum(LANGUAGES).default("ja"),
+  timezone: z.string().max(60).optional(),
+});
+
 function makeSlug(): string {
   return "shop-" + randomBytes(3).toString("hex");
+}
+
+const hashDeviceKey = (key: string) => createHash("sha256").update(key).digest("hex");
+
+// 登録なしのお店を、同じところから短い間にたくさん作らせない
+const START_LIMIT = 10;
+const START_WINDOW_MS = 60 * 60 * 1000;
+const starts = new Map<string, number[]>();
+function tooManyStarts(ip: string, now = Date.now()): boolean {
+  if (starts.size > 5000) starts.clear();
+  const recent = (starts.get(ip) ?? []).filter((t) => now - t < START_WINDOW_MS);
+  starts.set(ip, recent.length >= START_LIMIT ? recent : [...recent, now]);
+  return recent.length >= START_LIMIT;
 }
 
 export function registerAuthRoutes(app: Express) {
@@ -95,6 +122,20 @@ export function registerAuthRoutes(app: Express) {
       if (await storage.getOwnerByEmail(body.email)) throw new ApiError("email_in_use", 409);
 
       const isJa = body.language === "ja";
+      // 登録なしで使っていたお店なら、そのお店に登録する（予約や設定はそのまま引き継ぐ）
+      const current = req.session.ownerId ? await storage.getOwner(req.session.ownerId) : undefined;
+      if (current && !current.email) {
+        const lang = normalizeLang(current.language);
+        const owner = await storage.updateOwner(current.id, {
+          email: body.email.toLowerCase().trim(),
+          passwordHash: body.password ? hashSecret(body.password) : null,
+          passphraseHash: body.passphrase ? hashPassphrase(body.passphrase) : current.passphraseHash,
+          loginMethod: body.loginMethod,
+          ...(lang === "ja" ? { shopNameJa: body.shopName } : { shopNameEn: body.shopName }),
+          deviceKeyHash: null,
+        });
+        return res.json({ ok: true, owner: storage.publicOwner(owner) });
+      }
       const owner = await storage.createOwner({
         email: body.email.toLowerCase().trim(),
         passwordHash: body.password ? hashSecret(body.password) : null,
@@ -109,6 +150,46 @@ export function registerAuthRoutes(app: Express) {
       });
       req.session.ownerId = owner.id;
       res.status(201).json({ ok: true, owner: storage.publicOwner(owner) });
+    } catch (e) {
+      sendError(res, lang, e);
+    }
+  });
+
+  /** 登録なしで始める。この端末だけのお店を作り、入るための鍵を返す（端末に保存してもらう） */
+  app.post("/api/auth/start", async (req, res) => {
+    const lang = normalizeLang(req.body?.language ?? req.query.lang);
+    try {
+      const parsed = startSchema.safeParse(req.body ?? {});
+      if (!parsed.success) throw new ApiError("validation", 400);
+      if (tooManyStarts(req.ip ?? "")) throw new ApiError("too_many_starts", 429);
+      const body = parsed.data;
+      const deviceKey = randomBytes(24).toString("base64url");
+      const owner = await storage.createOwner({
+        email: null,
+        deviceKeyHash: hashDeviceKey(deviceKey),
+        language: body.language,
+        ...regionFor(body.timezone && isValidTimeZone(body.timezone) ? body.timezone : undefined, body.language === "ja"),
+        hours: DEFAULT_HOURS,
+        slug: makeSlug(),
+      });
+      req.session.staffId = undefined;
+      req.session.ownerId = owner.id;
+      res.status(201).json({ ok: true, owner: storage.publicOwner(owner), deviceKey });
+    } catch (e) {
+      sendError(res, lang, e);
+    }
+  });
+
+  /** 端末に保存した鍵で、登録前のお店に入り直す（ログインの期限が切れたときなど） */
+  app.post("/api/auth/device", async (req, res) => {
+    const lang = normalizeLang(req.body?.language ?? req.query.lang);
+    try {
+      const key = z.object({ key: z.string().min(16).max(100) }).safeParse(req.body);
+      const owner = key.success ? await storage.getOwnerByDeviceKeyHash(hashDeviceKey(key.data.key)) : undefined;
+      if (!owner || owner.email) throw new ApiError("device_key_invalid", 404);
+      req.session.staffId = undefined;
+      req.session.ownerId = owner.id;
+      res.json({ ok: true, owner: storage.publicOwner(owner) });
     } catch (e) {
       sendError(res, lang, e);
     }

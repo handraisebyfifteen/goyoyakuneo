@@ -4,10 +4,14 @@
  * - 予定から外れた・予定がない・その日に予定を変えた打刻は「要確認」の印を付ける
  * - 打刻も予定の登録・変更も、1件ずつお知らせに残す。管理画面を開いたときに AI の要約で伝える（ai/briefing.ts）
  * - 打刻はすべてオーナーが確認する。時刻を直したら、元の時刻を残して確認済みにする
+ * - 「予定どおりか」「要確認か」はオーナーだけに見せる。スタッフには自分の予定と打刻だけ（プレッシャーをかけない）
+ * - お知らせの受け取り方（全部／確認が必要なものだけ／伝えない、メールでも）は会話で決まる（owners.noticePrefs）
  */
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import type { Owner, Staff, Language, TimeEntry, AttendanceEvent, AttendanceFlag, Shift } from "@shared/schema";
+import { DEFAULT_NOTICE } from "@shared/schema";
+import { sendOwnerNotice } from "./email";
 import { normalizeLang } from "@shared/i18n";
 import * as storage from "./storage";
 import { requireOwner, type AuthedRequest } from "./auth";
@@ -32,6 +36,7 @@ export async function setShiftFor(owner: Owner, member: Staff, date: string, pla
   if (!isValidTime(planStart) || !isValidCloseTime(planEnd) || planStart >= planEnd) throw new ApiError("invalid_time");
   const today = todayFor(owner);
   if (date < today) throw new ApiError("past_time");
+  if (date > addDays(today, owner.planHorizonDays)) throw new ApiError("plan_too_far", 400, { days: owner.planHorizonDays });
   const cur = await storage.getShift(member.id, date);
   const now = new Date();
   if (!cur) {
@@ -79,7 +84,8 @@ export async function clockFor(owner: Owner, member: Staff, action: "in" | "out"
       if (shift.changedOnDay) flags.push({ code: "plan_changed" });
     }
     const entry = await storage.createTimeEntry({ ownerId: owner.id, staffId: member.id, clockIn: now, shiftId: shift?.id ?? null, planStart: shift?.planStart ?? null, planEnd: shift?.planEnd ?? null, flags });
-    await storage.addAttendanceEvent({ ownerId: owner.id, staffId: member.id, entryId: entry.id, kind: "clock_in", at: now, data: { time: toLocal(now, tz).time, planned: shift?.planStart ?? null, flags } });
+    const ev = await storage.addAttendanceEvent({ ownerId: owner.id, staffId: member.id, entryId: entry.id, kind: "clock_in", at: now, data: { time: toLocal(now, tz).time, planned: shift?.planStart ?? null, flags } });
+    await emailIfNeeded(owner, member, ev);
     return entry;
   }
 
@@ -93,9 +99,19 @@ export async function clockFor(owner: Owner, member: Staff, action: "in" | "out"
     if (shift.updatedAt.getTime() > entry.clockIn.getTime() && !flags.some((x) => x.code === "plan_changed")) flags.push({ code: "plan_changed" });
   }
   const updated = (await storage.updateTimeEntry(owner.id, entry.id, { clockOut: now, flags, planEnd: shift?.planEnd ?? entry.planEnd })) ?? entry;
-  await storage.addAttendanceEvent({ ownerId: owner.id, staffId: member.id, entryId: entry.id, kind: "clock_out", at: now,
+  const ev = await storage.addAttendanceEvent({ ownerId: owner.id, staffId: member.id, entryId: entry.id, kind: "clock_out", at: now,
     data: { time: toLocal(now, tz).time, planned: shift?.planEnd ?? null, flags: flags.slice(entry.flags.length) } });
+  await emailIfNeeded(owner, member, ev);
   return updated;
+}
+
+/** 確認が必要な打刻を、オーナーが望んでいればその場でメールでも知らせる（失敗しても打刻は残す） */
+async function emailIfNeeded(owner: Owner, member: Staff, ev: AttendanceEvent) {
+  const prefs = owner.noticePrefs ?? DEFAULT_NOTICE;
+  if (!prefs.attendanceEmail || prefs.attendance === "off" || !((ev.data as { flags?: unknown[] }).flags ?? []).length) return;
+  const lang: Language = owner.language === "en" ? "en" : "ja";
+  try { await sendOwnerNotice(owner, lang === "ja" ? "打刻の確認のお願い" : "Clock record to check", describeEvent(ev, member.name, lang) + (lang === "ja" ? "。" : ".")); }
+  catch (e) { console.error("[email]", e); }
 }
 
 // ---------- オーナーの確認・修正 ----------
@@ -183,14 +199,18 @@ export async function attendanceOverview(owner: Owner, lang: Language) {
  */
 export async function attendanceBriefing(owner: Owner, lang: Language, now = new Date()): Promise<string> {
   const ja = lang === "ja";
+  const prefs = owner.noticePrefs ?? DEFAULT_NOTICE;
   const events = await storage.listUnnotifiedEvents(owner.id);
+  // 「伝えない」なら、伝えたことにだけして何も言わない（管理画面の一覧には残る）
+  if (prefs.attendance === "off") { await storage.markEventsNotified(owner.id, events.map((e) => e.id), now); return ""; }
   const names = new Map((await storage.listStaff(owner.id)).map((s) => [s.id, s.name]));
   const parts: string[] = [];
   const clocks = events.filter((e) => e.kind === "clock_in" || e.kind === "clock_out");
   const ok = clocks.filter((e) => !((e.data as { flags?: unknown[] }).flags ?? []).length);
   const ng = clocks.filter((e) => ((e.data as { flags?: unknown[] }).flags ?? []).length);
-  const plans = events.filter((e) => e.kind === "plan_changed" || (e.kind === "plan_set" && (e.data as { date?: string }).date === todayFor(owner)));
-  if (ok.length) parts.push(ja ? `前回から、予定どおりの出勤・退勤が${ok.length}回ありました。` : `Since last time, ${ok.length} clock-in${ok.length > 1 ? "s and outs were" : " or out was"} on plan.`);
+  // 予定の変更は伝える。当日に初めて決めた予定は「全部」のときだけ
+  const plans = events.filter((e) => e.kind === "plan_changed" || (prefs.attendance === "all" && e.kind === "plan_set" && (e.data as { date?: string }).date === todayFor(owner)));
+  if (ok.length && prefs.attendance === "all") parts.push(ja ? `前回から、予定どおりの出勤・退勤が${ok.length}回ありました。` : `Since last time, ${ok.length} clock-in${ok.length > 1 ? "s and outs were" : " or out was"} on plan.`);
   for (const e of ng) parts.push(describeEvent(e, names.get(e.staffId) ?? "", lang) + (ja ? "。" : "."));
   for (const e of plans) parts.push(describeEvent(e, names.get(e.staffId) ?? "", lang) + (ja ? "。" : "."));
   await storage.markEventsNotified(owner.id, events.map((e) => e.id), now);

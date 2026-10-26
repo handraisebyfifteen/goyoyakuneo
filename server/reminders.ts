@@ -4,12 +4,14 @@
  * - メールのないお客さんには送れないので、オーナーが管理画面を開いたときに「電話してください」と伝える（ai/briefing.ts）
  * - 前日のうちに入った予約（確認メールが届いたばかり、または電話で話したばかり）は対象にしない
  * - 口コミのページが登録されていれば、来店の2時間後から2日以内に、お礼のメールに口コミのリンクを添えて送る
+ * - 次回の声かけ（followup.ts）もここから回す
  * 自動で回すのは本番だけ（開発中に本物のメールを送らないため）。REMINDERS=on なら開発でも回る。
  */
 import type { Owner } from "@shared/schema";
 import * as storage from "./storage";
 import { sendReminder, sendThanks } from "./email";
 import { appBaseUrl } from "./payments";
+import { runFollowups } from "./followup";
 import { nowLocal, fromLocal, addDays } from "./lib/time";
 
 const REMIND_FROM = "10:00";
@@ -36,6 +38,7 @@ export async function dueThanks(owner: Owner, now: Date = new Date()): Promise<s
 export async function runReminders(now: Date = new Date()): Promise<number> {
   let sent = 0;
   for (const owner of await storage.listOwners()) {
+    if (!owner.email) continue; // 登録前のお店からはメールを送らない
     if (nowLocal(owner.timezone, now).time < REMIND_FROM) continue;
     for (const r of await dueReminders(owner, now)) {
       if (!r.customer.email) continue;
@@ -54,6 +57,7 @@ export async function runReminders(now: Date = new Date()): Promise<number> {
         sent += 1;
       }
     }
+    sent += await runFollowups(owner, now);
   }
   return sent;
 }

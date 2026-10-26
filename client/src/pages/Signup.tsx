@@ -6,10 +6,15 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
 import { voiceConversationUsable } from "@/lib/speech";
 import { apiRequest, ApiRequestError, queryClient } from "@/lib/queryClient";
+import { useAuth } from "@/hooks/useAuth";
+import { forgetDeviceKey } from "@/lib/device";
 
 export default function Signup() {
   const { t, lang } = useI18n();
   const [, navigate] = useLocation();
+  // 登録なしで使っていたお店なら、そのお店に登録する（サーバーが同じお店に引き継ぐ）
+  const { owner, isLoading } = useAuth();
+  const upgrading = !!owner && !owner.registered;
   const [mode, setMode] = useState<"voice" | "form">(() => (voiceConversationUsable() ? "voice" : "form"));
 
   const steps = useMemo<Step[]>(() => [
@@ -37,6 +42,8 @@ export default function Signup() {
         passphrase: v.loginMethod !== "password" ? v.passphrase : undefined,
         password: v.loginMethod !== "passphrase" ? v.password : undefined,
       });
+      // 登録したら、端末の鍵はもういらない（これからはメールと合言葉・パスワードで入る）
+      forgetDeviceKey();
       await queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       // 設定の画面には寄らず、すぐ使い始める。必要な設定はパートナー（声のパネル）が少しずつ聞く
       navigate("/admin");
@@ -46,8 +53,8 @@ export default function Signup() {
   }
 
   return (
-    <Layout title={t("signupTitle")}>
-      <VoiceConversation steps={steps} intro={t("signupSpeech")} mode={mode} onModeChange={setMode} onComplete={complete} submitLabel={t("ownerSignup")} />
+    <Layout title={upgrading ? t("registerShop") : t("signupTitle")}>
+      {isLoading ? <p>{t("loading")}</p> : <VoiceConversation key={upgrading ? "upgrade" : "new"} steps={steps} intro={upgrading ? t("registerSpeech") : t("signupSpeech")} mode={mode} onModeChange={setMode} onComplete={complete} submitLabel={upgrading ? t("registerShop") : t("ownerSignup")} />}
       <p className="mt-6"><Button variant="link" asChild><Link href="/login">{t("haveAccount")}</Link></Button></p>
     </Layout>
   );

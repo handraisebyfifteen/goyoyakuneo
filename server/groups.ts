@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { Owner, Language } from "@shared/schema";
 import { normalizeLang } from "@shared/i18n";
 import * as storage from "./storage";
-import { requireOwner, type AuthedRequest } from "./auth";
+import { requireOwner, requireRegistered, type AuthedRequest } from "./auth";
 import { ApiError, sendError } from "./errors";
 import { salesSummaryFor, todayFor } from "./services";
 import { monthRange } from "./lib/time";
@@ -62,12 +62,12 @@ export function registerGroupRoutes(app: Express) {
   app.get("/api/owner/group", requireOwner, handle(async (_req, res, owner, lang) => {
     res.json({ ok: true, ...((await groupSummaryFor(owner, lang)) ?? { group: null, shops: [] }) });
   }));
-  app.post("/api/owner/group", requireOwner, handle(async (req, res, owner) => {
+  app.post("/api/owner/group", requireOwner, requireRegistered, handle(async (req, res, owner) => {
     const { name } = z.object({ name: z.string().max(100).default("") }).parse(req.body ?? {});
     const g = await createGroupFor(owner, name);
     res.status(201).json({ ok: true, group: { name: g.name, joinCode: g.joinCode } });
   }));
-  app.post("/api/owner/group/join", requireOwner, handle(async (req, res, owner) => {
+  app.post("/api/owner/group/join", requireOwner, requireRegistered, handle(async (req, res, owner) => {
     const { code } = z.object({ code: z.string().min(1).max(40) }).parse(req.body);
     const g = await joinGroupFor(owner, code);
     res.json({ ok: true, group: { name: g.name, joinCode: g.joinCode } });

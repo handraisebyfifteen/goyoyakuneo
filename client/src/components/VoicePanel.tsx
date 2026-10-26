@@ -15,6 +15,8 @@ import { Label } from "@/components/ui/label";
 import { useI18n } from "@/lib/i18n";
 import { apiRequest, ApiRequestError } from "@/lib/queryClient";
 import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, unlockSpeech, SpeechNotAllowed, isTouchDevice } from "@/lib/speech";
+import { flashSignal, setSignal, type SignalState } from "@/lib/signal";
+import { SignalSettings } from "@/components/SignalSettings";
 
 type Model = "daily" | "consult";
 type Msg = { id: number; role: "user" | "assistant"; text: string; model?: Model; kind?: "confirm" | "passphrase" };
@@ -27,7 +29,7 @@ type Reply =
 const PITCH: Record<Model, number> = { daily: 1.05, consult: 0.8 };
 const MAX_SHOWN = 14;
 
-export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void; onShareLink?: () => void }) {
+export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?: () => void; onShareLink?: () => void; onRegister?: () => void }) {
   const { t, lang, speechLang } = useI18n();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -73,11 +75,18 @@ export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void;
     if (reply.type === "reply") {
       pendingRef.current = null;
       push({ role: "assistant", text: reply.text, model: reply.model });
-      if (reply.changed) onChanged?.();
+      if (reply.changed) { onChanged?.(); flashSignal("ok"); }
       const cam = (reply.actions ?? []).find((a) => a.action === "open_camera");
       const share = (reply.actions ?? []).some((a) => a.action === "share_link");
+      const register = (reply.actions ?? []).some((a) => a.action === "open_signup");
       await say(reply.text, reply.model);
       if (!alive()) return;
+      if (register) {
+        // 「登録する」→ 読み終わったら登録の画面へ
+        setPhase("idle");
+        onRegister?.();
+        return;
+      }
       if (share) {
         // 共有画面は操作の中でしか開けないので、送るボタンへフォーカスを移して押してもらう
         setPhase("idle");
@@ -113,7 +122,7 @@ export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void;
     if (sttSupported()) void listenForPassphrase();
     else inputRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [push, say, onChanged]);
+  }, [push, say, onChanged, onRegister]);
 
   const post = useCallback(async (url: string, body: unknown) => {
     const id = ++runId.current;
@@ -127,6 +136,7 @@ export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void;
       if (runId.current !== id) return;
       const msg = e instanceof ApiRequestError ? e.message : t("error");
       setError(msg);
+      flashSignal("ng");
       push({ role: "assistant", text: msg });
       await say(msg);
       setPhase("idle");
@@ -217,6 +227,7 @@ export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void;
       if (runId.current !== id) return;
       const msg = e instanceof ApiRequestError ? e.message : t("error");
       setError(msg);
+      flashSignal("ng");
       push({ role: "assistant", text: msg });
       await say(msg);
       setPhase("camera");
@@ -274,7 +285,18 @@ export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void;
     return () => { window.removeEventListener("keydown", retry); window.removeEventListener("pointerdown", retry); };
   }, [needsGesture, speechLang, t]);
 
-  useEffect(() => () => { runId.current++; stopSpeaking(); stopListening(); }, []);
+  useEffect(() => () => { runId.current++; stopSpeaking(); stopListening(); setSignal("idle"); }, []);
+
+  // 少し見える人への合図（画面のふちの光と振動）。はい/いいえを聞いている間は「確認待ち」として知らせる
+  useEffect(() => {
+    const stage = pendingRef.current?.stage;
+    const s: SignalState = phase === "listening" ? (stage === "confirm" ? "confirm" : "listen")
+      : phase === "thinking" || phase === "reading" ? "think"
+      : phase === "speaking" ? "speak"
+      : phase === "confirm" ? "confirm"
+      : "idle";
+    setSignal(s);
+  }, [phase]);
 
   function submitTyped(e: React.FormEvent) {
     e.preventDefault();
@@ -356,6 +378,8 @@ export function VoicePanel({ onChanged, onShareLink }: { onChanged?: () => void;
         </label>
         <span className="text-muted-foreground">{t("spaceHint")}</span>
       </div>
+
+      <SignalSettings />
 
       <details className="text-left">
         <summary className="cursor-pointer font-semibold">{t("transcript")}</summary>

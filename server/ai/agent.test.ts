@@ -12,11 +12,11 @@ import { DEFAULT_HOURS } from "@shared/schema";
 import { hashPassphrase, verifyPassphrase } from "../lib/passphrase";
 
 const owner: Owner = {
-  id: 1, email: "o@example.com", passwordHash: null, passphraseHash: hashPassphrase("ひかり"), loginMethod: "passphrase",
+  id: 1, email: "o@example.com", passwordHash: null, passphraseHash: hashPassphrase("ひかり"), deviceKeyHash: null, loginMethod: "passphrase",
   shopNameJa: "テスト治療院", shopNameEn: "", address: "", phone: "", info: "", businessType: "massage",
   country: "JP", currency: "JPY", timezone: "Asia/Tokyo", language: "ja", hours: DEFAULT_HOURS,
   bufferMinutes: 15, slotStepMinutes: 30, maxDaysAhead: 60, minHoursBefore: 2, freeCancelHoursBefore: 24,
-  allowCardPayment: true, slug: "t", onboardingDone: true, lastBriefedAt: null, calendarToken: null, reviewUrl: "", allowNomination: false, clockToleranceMinutes: 30, groupId: null, setupState: { done: [], skipped: [], asks: {} }, createdAt: new Date(),
+  allowCardPayment: true, slug: "t", onboardingDone: true, lastBriefedAt: null, calendarToken: null, reviewUrl: "", allowNomination: false, clockToleranceMinutes: 30, planHorizonDays: 31, followupAfterDays: 0, stripeCustomerId: null, subscriptionId: null, subscriptionStatus: null, subscriptionSeats: 0, noticePrefs: null, groupId: null, setupState: { done: [], skipped: [], asks: {} }, createdAt: new Date(),
 };
 
 type Script = (messages: ChatMsg[]) => { content?: string; toolCalls?: { id: string; name: string; arguments: string }[] };

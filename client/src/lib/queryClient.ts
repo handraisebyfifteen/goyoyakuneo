@@ -26,7 +26,10 @@ export async function apiRequest<T = unknown>(method: string, url: string, body?
     credentials: "include",
   });
   await throwIfNotOk(res);
-  return res.json();
+  const data: T = await res.json();
+  // 書き込みのあとは「今できること」を読み直す（何を登録・設定したかで変わる）
+  if (method !== "GET") void queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("/api/owner/capabilities") });
+  return data;
 }
 
 const defaultQueryFn: QueryFunction = async ({ queryKey }) => {

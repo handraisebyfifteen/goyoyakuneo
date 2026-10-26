@@ -1,13 +1,15 @@
 /**
  * 日常モデルに渡すツール。仕様（名前・引数）と、実行（services / storage を呼ぶ）をここにまとめる。
  *
- * - 読むだけのツールは確認なしで実行する（設定の質問を「聞かないで」にする set_setup_item も、予約やお金に関わらないので確認なし）
+ * - 読むだけのツールは確認なしで実行する（設定の質問を「聞かないで」にする set_setup_item、会話で覚える remember / forget、
+ *   お知らせの受け取り方 set_notice_preferences も、予約やお金に関わらないので確認なし）
  * - 書き込むツールは、本人が「はい」と言うまで実行しない（判定は agent.ts がコードで行う）
  * - ★ GUARDED のツールは、さらに合言葉が合うまで実行しない。合言葉そのものは AI に渡らない
  * - すべての金額は { amount, display } の形で返す。AI は display を読み上げる
  */
 import type OpenAI from "openai";
-import type { Owner, Language, WeekdayKey, BusinessHours, Staff } from "@shared/schema";
+import type { Owner, Language, WeekdayKey, BusinessHours, Staff, NoticePrefs } from "@shared/schema";
+import { DEFAULT_NOTICE, EXPENSE_CATEGORIES } from "@shared/schema";
 import { WEEKDAY_KEYS, settingsPatchSchema } from "@shared/schema";
 import { cancelPolicyText, errorMessage, WEEKDAY_LABELS } from "@shared/i18n";
 import { money, toMinor } from "@shared/money";
@@ -20,16 +22,23 @@ import {
   recordOnsitePaymentFor, salesSummaryFor, addBlockedSlotFor, reservationsOutsideHours, todayFor,
 } from "../services";
 import { createPaymentLink } from "../payments";
-import { SETUP_ITEMS, markSetupItem, noteSetupProgress, menuSuggestion } from "./setup";
+import { SETUP_ITEMS, markSetupItem, noteSetupProgress, menuSuggestion, nextSetupQuestion } from "./setup";
 import { normalizeCode } from "../lib/coupon";
-import { seatsFor, timesheetFor, createStaffFor, updateStaffFor, inviteStaff } from "../staff";
+import { seatsFor, timesheetFor, createStaffFor, updateStaffFor, inviteStaff, payrollFor } from "../staff";
 import { groupSummaryFor, createGroupFor, joinGroupFor } from "../groups";
 import { attendanceOverview, confirmEntriesFor, correctEntryFor, entryView } from "../attendance";
+import { rememberFor } from "./memory";
+import { addExpenseFor, profitFor, categoryLabel } from "../books";
+import { guessCategory } from "../lib/expense";
+import { sellTicketFor, sellFromType, useTicketFor, ticketView, ticketTypeView } from "../tickets";
+import { billingStatus } from "../billing";
+import { capabilitiesFor, type Ability } from "../capabilities";
 
 export const READ_TOOLS = new Set([
   "get_settings", "get_today_reservations", "get_reservations_by_date", "find_reservations_by_customer",
   "get_available_slots", "get_menus", "get_sales_summary", "get_cancel_policy", "check_cash", "get_customer",
   "set_setup_item", "share_booking_link", "get_coupons", "get_staff", "get_timesheet", "get_group_summary", "get_attendance",
+  "remember", "forget", "set_notice_preferences", "get_payroll", "get_books", "get_billing", "get_ticket_types", "open_registration", "get_capabilities",
 ]);
 export const WRITE_TOOLS = new Set([
   "update_settings", "update_business_info", "set_business_hours", "update_booking_rules",
@@ -37,8 +46,12 @@ export const WRITE_TOOLS = new Set([
   "add_blocked_slot", "delete_blocked_slot", "create_payment_link", "record_onsite_payment",
   "update_customer", "mark_no_show", "create_recurring_reservations",
   "create_coupon", "stop_coupon", "create_staff", "update_staff", "create_shop_group", "join_shop_group",
-  "confirm_attendance", "correct_attendance",
+  "confirm_attendance", "correct_attendance", "add_expense", "delete_expense", "sell_ticket", "use_ticket", "set_followup", "create_ticket_type", "stop_ticket_type",
 ]);
+/** 外に出るもの（お客さん・スタッフ・ほかの店・メール）。登録前のお店では使えない */
+const REGISTERED_TOOLS = new Set(["share_booking_link", "create_payment_link", "create_staff", "update_staff", "create_shop_group", "join_shop_group", "set_followup"]);
+/** 確認なしで実行するが、記録は変わるもの（画面を読み直してもらう） */
+export const QUIET_WRITE_TOOLS = new Set(["set_setup_item", "remember", "forget", "set_notice_preferences"]);
 /** お金や決まりに関わるもの → 合言葉も必要 */
 export const GUARDED_TOOLS = new Set(["update_settings", "update_booking_rules", "cancel_reservation", "record_onsite_payment", "correct_attendance"]);
 /** 相談モデルへの切り替え（日常モデルが判定して呼ぶ） */
@@ -69,11 +82,25 @@ export const TOOL_SPECS: Spec[] = [
   fn("get_cancel_policy", "キャンセルの決まりを見る。"),
   fn("check_cash", "現地払いで受け取ったお金をカメラで数え、おつりを計算する。記録はしない。", { reservation_id: RID }, ["reservation_id"]),
   fn("set_setup_item", "設定の質問への答えを記録する。「このままでいい」なら status=done、「聞かないで」なら status=skip。設定の質問を全部やめてほしいと言われたら item=all, status=skip。「あとで」のときは呼ばない。", {
-    item: { type: "string", enum: [...SETUP_ITEMS, "all"] }, status: { type: "string", enum: ["done", "skip"] },
+    item: { type: "string", enum: [...SETUP_ITEMS.filter((k) => k !== "account"), "all"] }, status: { type: "string", enum: ["done", "skip"] },
   }, ["item", "status"]),
+  fn("open_registration", "お店の登録（店名・メール・ログインの方法）の画面へ移る。「登録したい」「お店を登録して」と言われたときに呼ぶ。メールやパスワード・合言葉は会話で聞かない（画面で本人が入れる）。"),
   fn("get_coupons", "クーポンの一覧（コード、割引、期限、使えるか）を見る。"),
   fn("get_staff", "スタッフの一覧と権限（施術する・指名・フリー・受けられるコース・ログインできるか・出勤中か）、料金の人数を見る。"),
   fn("get_timesheet", "スタッフの勤務時間（打刻の合計）を月ごとに見る。", { month: { type: "string", description: "YYYY-MM（省けば今月）" } }),
+  fn("remember", "オーナーの好み・決まりごと・お店の事情を覚える（次の会話から使う）。「覚えて」と言われたときだけでなく、「次から〜して」「〜はいらない」「いつも〜」「〜さんは〜」のように、これからも役立つことを言われたら短い一文で呼ぶ。前に覚えたことを直すなら replace_id にその番号。合言葉・パスワード・カード番号は覚えない。", {
+    content: { type: "string", description: "覚えること（短い一文。例: 予定どおりの打刻はいちいち伝えなくていい）" },
+    replace_id: { type: "integer", description: "置き換える前の記憶の番号（覚えていることの一覧にある）" },
+  }, ["content"]),
+  fn("forget", "覚えていることを忘れる。「それは忘れて」「もう違う」と言われたとき。", { id: { type: "integer", description: "記憶の番号" } }, ["id"]),
+  fn("set_notice_preferences", "お知らせの受け取り方を決める。attendance: 打刻のお知らせ（all=全部、checks=確認が必要なものと予定の変更だけ、off=伝えない）。attendance_email: 確認が必要な打刻を、その場でメールでも知らせるか。言われた項目だけ渡す。", {
+    attendance: { type: "string", enum: ["all", "checks", "off"] }, attendance_email: { type: "boolean" },
+  }),
+  fn("get_books", "経費の一覧と、期間の利益（売り上げ − 経費 − 給与）を見る。経費を消す前に id を調べるのにも使う。", { start_date: DATE, end_date: DATE }),
+  fn("get_ticket_types", "回数券・前払いの種類（名前、回数か金額、料金、有効日数、売れた数）を見る。"),
+  fn("get_capabilities", "今できることの一覧を見る。ready は登録・設定してあるからできること、always はいつでもできること、next は設定するとできること。say は話しかけるときの言い方の例（null は自動で動くもの）。「何ができる？」「今できることは？」と聞かれたときに使う。"),
+  fn("get_billing", "このアプリの月額の契約の状態と、今の人数での月額の目安を見る。"),
+  fn("get_payroll", "スタッフの月の給与（勤務時間×時給＋指名料＋歩合）を計算して見る。確認していない打刻があれば件数も返す。", { month: { type: "string", description: "YYYY-MM（省けば今月）" } }),
   fn("get_attendance", "スタッフの打刻で、オーナーがまだ確認していないもの（予定どおりか、要確認ならその理由）と、最近のお知らせ（打刻・予定の変更）を見る。"),
   fn("get_group_summary", "店舗グループのほかの店も含めた集計（売り上げ・件数・取り消し・無断キャンセル）を見る。", { start_date: DATE, end_date: DATE }),
   fn("share_booking_link", "お客さん用の予約ページのリンクを送る・渡す・QRコードを出すと頼まれたときに呼ぶ。画面の送るボタンにフォーカスを移す。"),
@@ -98,7 +125,8 @@ export const TOOL_SPECS: Spec[] = [
     buffer_minutes: { type: "integer", description: "施術と施術の間の空き時間（分）" },
     slot_step_minutes: { type: "integer", description: "空き時間を案内する刻み（分）" },
     max_days_ahead: { type: "integer", description: "お客さんが何日先まで予約できるか" },
-    clock_tolerance_minutes: { type: "integer", description: "スタッフの打刻が予定どおりとみなせる幅（予定の前後、分）" },
+    clock_tolerance_minutes: { type: "integer", enum: [15, 30], description: "スタッフの打刻が予定どおりとみなせる幅（予定の前後、15分か30分）" },
+    plan_horizon_days: { type: "integer", enum: [7, 14, 31, 62], description: "スタッフが勤務の予定を何日先まで入れられるか（1週間=7、2週間=14、1ヶ月=31、2ヶ月=62）" },
     min_hours_before: { type: "integer", description: "お客さんの予約は何時間前までか" },
     free_cancel_hours_before: { type: "integer", description: "何時間前までのキャンセルなら全額返金か" },
     allow_card_payment: { type: "boolean", description: "予約時のカード前払いを許可するか" },
@@ -145,6 +173,8 @@ export const TOOL_SPECS: Spec[] = [
     staff_name: STR, new_name: STR, email: STR, treats: { type: "boolean" }, accept_nominated: { type: "boolean" }, accept_free: { type: "boolean" },
     menu_names: { type: "array", items: { type: "string" }, description: "受けられるコース。全コースに戻すなら [\"all\"]" },
     role: { type: "string", enum: ["staff", "manager"] }, active: { type: "boolean" }, send_invite: { type: "boolean", description: "ログインの招待を送り直す" },
+    hourly_wage: { ...MONEY, description: "時給（普通の金額）" }, nomination_fee: { ...MONEY, description: "指名1件あたりの指名料" },
+    commission_percent: { type: "integer", description: "担当した施術の売り上げに対する歩合（%）" },
   }, ["staff_name"]),
   fn("confirm_attendance", "スタッフの打刻を確認済みにする。「打刻を確認して」なら only_ok=true（予定どおりのものだけ）。要確認のものは、本人が「それも確認」「全部確認」と言ったときだけ only_ok=false で。staff_name でその人の分だけにできる。", {
     staff_name: STR, only_ok: { type: "boolean", description: "予定どおりのものだけ確認するなら true（省けば true）" },
@@ -152,6 +182,27 @@ export const TOOL_SPECS: Spec[] = [
   fn("correct_attendance", "スタッフの打刻の時刻を直す（元の時刻は残り、確認済みになる）。date はその打刻の日。", {
     staff_name: STR, date: DATE, clock_in: TIME, clock_out: { type: "string", description: "退勤 HH:MM（24:00 も可）" },
   }, ["staff_name", "date"]),
+  fn("add_expense", "経費を記録する。「タオル代3000円」なら amount=3000, category=supplies, memo=タオル代。日付を言われなければ今日。科目は内容から選ぶ（消耗品・備品=supplies、家賃=rent、電気水道ガス=utilities、電話・ネット=communication、交通費=travel、広告=advertising、接待=entertainment、外注=outsourcing、手数料=fees、研修・講習=training、修理=repairs、保険=insurance）。わからなければ category は省く（内容から自動で決まる）。", {
+    amount: MONEY, category: { type: "string", enum: Object.keys(EXPENSE_CATEGORIES) }, memo: STR, date: DATE,
+  }, ["amount", "memo"]),
+  fn("create_ticket_type", "回数券・前払いの種類を決める（売るときは種類を選ぶだけになる）。相談役と相談して決めた案を登録するときにも使う。回数券は kind=count と count、前払いは kind=credit と amount。price は売る値段。valid_days は売った日から何日使えるか（省けば期限なし）。", {
+    name: { type: "string", description: "種類の名前（例: 60分5回券）" }, kind: { type: "string", enum: ["count", "credit"] }, count: INT,
+    amount: { ...MONEY, description: "前払いで使える金額" }, price: { ...MONEY, description: "売る値段" }, menu_name: STR, valid_days: INT,
+  }, ["name", "kind", "price"]),
+  fn("stop_ticket_type", "回数券・前払いの種類の販売をやめる（もう売った券はそのまま使える）。", { name: STR }, ["name"]),
+  fn("sell_ticket", "回数券か前払いを売る。決めてある種類なら ticket_type にその名前だけ渡す（回数・値段・期限は種類のとおり）。種類を使わないときは、回数券は kind=count と count、前払いは kind=credit と amount、price は実際に受け取った金額。", {
+    customer_name: STR, ticket_type: { type: "string", description: "決めてある種類の名前（例: 60分5回券）" },
+    kind: { type: "string", enum: ["count", "credit"] }, name: { type: "string", description: "券の名前（例: 60分コース5回券）" },
+    count: INT, amount: { ...MONEY, description: "前払いで使える金額" }, price: { ...MONEY, description: "受け取った金額" }, menu_name: STR,
+    expires_on: { ...DATE, description: "使える期限（省けば期限なし）" },
+  }, ["customer_name"]),
+  fn("set_followup", "次回の声かけ：前回の来店から何日あいたお客さんに「そろそろいかがですか」のメールを送るか決める。0 なら送らない。メールのあるお客さんに一度だけ送り、配信を止めるリンクも入る。", {
+    days: { type: "integer", description: "何日あいたら送るか（例: 30、45、60）。やめるなら 0" },
+  }, ["days"]),
+  fn("use_ticket", "現地払い待ちの予約の支払いに、そのお客さんの回数券か前払いを使う。メニューなしの予約を前払いで払うなら amount。", {
+    reservation_id: RID, amount: { ...MONEY, description: "前払いから引く金額（メニューなしの予約のとき）" },
+  }, ["reservation_id"]),
+  fn("delete_expense", "記録した経費を消す（get_books の id）。", { expense_id: { type: "integer" } }, ["expense_id"]),
   fn("create_shop_group", "ほかの店舗と集計を見せ合うグループを作る。参加コードを返す（ほかの店に伝える）。", { name: STR }),
   fn("join_shop_group", "ほかの店舗のグループに、参加コードで入る。入ると集計（売り上げと件数）だけを見せ合う。", { code: STR }, ["code"]),
   fn("mark_no_show", "連絡なしで来なかった予約を、無断キャンセルとして記録する。予約の時間を過ぎてから使う。", { reservation_id: RID }, ["reservation_id"]),
@@ -234,6 +285,15 @@ async function findEntry(ctx: ToolContext, staffId: number, date: string) {
   return entry;
 }
 
+async function requireTicketType(ctx: ToolContext, name: unknown) {
+  const t = await storage.findTicketTypeByName(ctx.owner.id, str(name) ?? "");
+  if (!t) {
+    const names = (await storage.listTicketTypes(ctx.owner.id, true)).map((x) => x.name).join(ctx.lang === "ja" ? "、" : ", ");
+    throw new ApiError("ticket_type_not_found", 404, { names });
+  }
+  return t;
+}
+
 async function requireCustomer(ctx: ToolContext, id: unknown) {
   const n = int(id);
   const c = n ? await storage.getCustomer(ctx.owner.id, n) : undefined;
@@ -266,9 +326,16 @@ export async function executeTool(ctx: ToolContext, name: string, args: Record<s
   try {
     const impl = IMPL[name];
     if (!impl) return { ok: false, error: errorMessage("unknown_tool", ctx.lang, { name }) };
+    if (!ctx.owner.email && REGISTERED_TOOLS.has(name)) throw new ApiError("registration_required", 403);
+    const asked = ctx.owner.setupState?.lastAsked;
     const result = await impl(ctx, args ?? {});
     // 声で設定を変えたら、その設定の質問は済んだことにする
     if (result.ok && WRITE_TOOLS.has(name)) ctx.owner = await noteSetupProgress(ctx.owner, name, args ?? {});
+    // 聞いていた設定に答えてもらえたら、続けて次の項目を聞く（使い始めのうちに決めてもらう）
+    if (result.ok && asked && ctx.owner.setupState?.lastAsked !== asked) {
+      const next = await nextSetupQuestion(ctx.owner, ctx.lang);
+      if (next) return { ...result, suggestion: [result.suggestion, next].filter(Boolean).join(ctx.lang === "ja" ? "" : " ") };
+    }
     return result;
   } catch (e) {
     if (e instanceof ApiError || e instanceof BookingError) return { ok: false, error: errorMessage(e.code, ctx.lang, e.params) };
@@ -346,10 +413,15 @@ const IMPL: Record<string, Impl> = {
       note: ctx.lang === "ja" ? "カメラを開きます。カメラのボタンを押して、受け取ったお金を写してください。読み取りの結果は別に読み上げます。" : "Opening the camera. Press the camera button and photograph the cash you received. The reading will be read out separately." };
   },
 
+  async open_registration(ctx) {
+    if (ctx.owner.email) return { ok: false, error: ctx.lang === "ja" ? "このお店は、もう登録してあります" : "This shop is already registered." };
+    return { ok: true, action: "open_signup",
+      note: ctx.lang === "ja" ? "登録の画面に移ります。店名、メール、ログインの方法の順に聞きます。今の予約や設定は、そのまま引き継ぎます。" : "Opening the registration screen. It asks for the shop name, email and how you log in. Bookings and settings carry over." };
+  },
   async set_setup_item(ctx, a) {
     const item = str(a.item) ?? "";
     const status = str(a.status);
-    if (![...SETUP_ITEMS, "all"].includes(item as never) || (status !== "done" && status !== "skip")) throw new ApiError("validation");
+    if (item === "account" || ![...SETUP_ITEMS, "all"].includes(item as never) || (status !== "done" && status !== "skip")) throw new ApiError("validation");
     ctx.owner = await markSetupItem(ctx.owner, item, status);
     return { ok: true, item, status };
   },
@@ -368,6 +440,47 @@ const IMPL: Record<string, Impl> = {
     const month = str(a.month) || todayFor(ctx.owner).slice(0, 7);
     if (!/^\d{4}-\d{2}$/.test(month)) throw new ApiError("validation");
     return { ok: true, month, staff: await timesheetFor(ctx.owner, month) };
+  },
+  async remember(ctx, a) {
+    const r = await rememberFor(ctx.owner, str(a.content) ?? "", int(a.replace_id));
+    if (!r.ok) return { ok: false, error: r.reason === "secret"
+      ? (ctx.lang === "ja" ? "合言葉やパスワード、カード番号のような秘密は覚えません" : "I do not keep secrets such as passphrases, passwords or card numbers.")
+      : errorMessage("validation", ctx.lang) };
+    return { ok: true, remembered: str(a.content) };
+  },
+  async forget(ctx, a) {
+    const ok = await storage.deleteMemory(ctx.owner.id, int(a.id) ?? 0);
+    if (!ok) throw new ApiError("not_found", 404);
+    return { ok: true };
+  },
+  async set_notice_preferences(ctx, a) {
+    const cur = ctx.owner.noticePrefs ?? DEFAULT_NOTICE;
+    const att = str(a.attendance);
+    const next: NoticePrefs = {
+      attendance: att === "all" || att === "checks" || att === "off" ? att : cur.attendance,
+      attendanceEmail: bool(a.attendance_email) ?? cur.attendanceEmail,
+    };
+    ctx.owner = await markSetupItem(await storage.updateOwner(ctx.owner.id, { noticePrefs: next }), "notices", "done");
+    return { ok: true, notice: next };
+  },
+  async get_books(ctx, a) {
+    const today = todayFor(ctx.owner);
+    const from = str(a.start_date) || monthRange(today).from, to = str(a.end_date) || monthRange(today).to;
+    if (!isValidDate(from) || !isValidDate(to)) throw new ApiError("invalid_date");
+    const list = await storage.listExpenses(ctx.owner.id, from, to);
+    return { ok: true, profit: await profitFor(ctx.owner, from, to, ctx.lang),
+      expenses: list.slice(-30).map((e) => ({ id: e.id, date: e.date, amount: money(e.amount, ctx.owner.currency, ctx.lang), category: categoryLabel(e.category, ctx.lang), memo: e.memo })) };
+  },
+  async get_billing(ctx) {
+    const b = await billingStatus(ctx.owner, ctx.lang);
+    return { ok: true, ...b, note: b.configured ? "" : (ctx.lang === "ja" ? "月額のお支払いは、まだ準備中です。" : "Monthly billing is not set up yet.") };
+  },
+  async get_payroll(ctx, a) {
+    const month = str(a.month) || todayFor(ctx.owner).slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new ApiError("validation");
+    const r = await payrollFor(ctx.owner, month, ctx.lang);
+    return { ok: true, month, total: r.total, staff: r.staff.map(({ staffId: _i, totalMinor: _t, minutes: _m, ...rest }) => rest),
+      note: r.staff.some((s) => s.unconfirmed) ? (ctx.lang === "ja" ? "確認していない打刻があります。確認してから確定してください。" : "Some clock records are not confirmed yet. Confirm them before finalising.") : "" };
   },
   async get_attendance(ctx) {
     const r = await attendanceOverview(ctx.owner, ctx.lang);
@@ -393,8 +506,10 @@ const IMPL: Record<string, Impl> = {
       const rows = await storage.listReservationsOfCustomer(ctx.owner.id, c.id);
       const visits = rows.filter((r) => (r.status === "confirmed" || r.status === "completed") && r.endAt.getTime() <= now);
       const upcoming = rows.filter((r) => r.status === "confirmed" && r.endAt.getTime() > now);
+      const today = todayFor(ctx.owner);
+      const tickets = (await storage.listTickets(ctx.owner.id, c.id)).map((t) => ticketView(t, ctx.owner, ctx.lang, today)).filter((t) => t.usable).map(({ id: _i, customerId: _c, menuId: _m, ...t }) => t);
       return {
-        id: c.id, name: c.name, phone: c.phone || null, email: c.email, notes: c.notes || null,
+        id: c.id, name: c.name, phone: c.phone || null, email: c.email, notes: c.notes || null, tickets,
         visitCount: visits.length, noShowCount: rows.filter((r) => r.status === "no_show").length,
         cancelCount: rows.filter((r) => r.status === "cancelled").length,
         lastVisit: visits.length ? visitBrief(ctx, visits[visits.length - 1]) : null,
@@ -455,11 +570,13 @@ const IMPL: Record<string, Impl> = {
     });
     const tol = int(a.clock_tolerance_minutes);
     if (tol !== undefined) Object.assign(patch, settingsPatchSchema.pick({ clockToleranceMinutes: true }).parse({ clockToleranceMinutes: tol }));
+    const horizon = int(a.plan_horizon_days);
+    if (horizon !== undefined) Object.assign(patch, settingsPatchSchema.pick({ planHorizonDays: true }).parse({ planHorizonDays: horizon }));
     const nomination = bool(a.allow_nomination);
     if (nomination !== undefined) Object.assign(patch, { allowNomination: nomination });
     const o = await storage.updateOwner(ctx.owner.id, patch);
     ctx.owner = o;
-    return { ok: true, rules: { bufferMinutes: o.bufferMinutes, slotStepMinutes: o.slotStepMinutes, maxDaysAhead: o.maxDaysAhead, minHoursBefore: o.minHoursBefore, freeCancelHoursBefore: o.freeCancelHoursBefore, allowCardPayment: o.allowCardPayment, allowNomination: o.allowNomination, clockToleranceMinutes: o.clockToleranceMinutes },
+    return { ok: true, rules: { bufferMinutes: o.bufferMinutes, slotStepMinutes: o.slotStepMinutes, maxDaysAhead: o.maxDaysAhead, minHoursBefore: o.minHoursBefore, freeCancelHoursBefore: o.freeCancelHoursBefore, allowCardPayment: o.allowCardPayment, allowNomination: o.allowNomination, clockToleranceMinutes: o.clockToleranceMinutes, planHorizonDays: o.planHorizonDays },
       cancelPolicy: cancelPolicyText(o.freeCancelHoursBefore, ctx.lang) };
   },
   async create_menu(ctx, a) {
@@ -510,7 +627,8 @@ const IMPL: Record<string, Impl> = {
         r.emailNote === "sent" ? (ctx.lang === "ja" ? "確認メールを送りました。" : "A confirmation email was sent.")
           : r.emailNote === "logged" ? (ctx.lang === "ja" ? "メールの設定がないため、確認メールは送らずに記録だけしました。" : "Email is not configured, so the confirmation was only logged.")
           : r.emailNote === "limit" ? (ctx.lang === "ja" ? "本日のメール送信の上限に達したため、確認メールは送っていません。" : "Today's email limit was reached, so no confirmation email was sent.")
-          : r.emailNote === "failed" ? (ctx.lang === "ja" ? "確認メールを送れませんでした。" : "The confirmation email could not be sent.") : "",
+          : r.emailNote === "failed" ? (ctx.lang === "ja" ? "確認メールを送れませんでした。" : "The confirmation email could not be sent.")
+          : r.emailNote === "unregistered" ? (ctx.lang === "ja" ? "お店を登録していないため、確認メールは送っていません。登録すると送れるようになります。" : "The shop is not registered yet, so no confirmation email was sent. Registering turns emails on.") : "",
       ].filter(Boolean).join(" ") };
   },
   async create_recurring_reservations(ctx, a) {
@@ -633,6 +751,9 @@ const IMPL: Record<string, Impl> = {
       name: str(a.new_name) || undefined, email: a.email !== undefined ? str(a.email) || null : undefined,
       treats: bool(a.treats), acceptNominated: bool(a.accept_nominated), acceptFree: bool(a.accept_free), active: bool(a.active),
       menuIds: await menuIdsFrom(ctx, a.menu_names), role: role === "manager" || role === "staff" ? role : undefined,
+      hourlyWage: a.hourly_wage !== undefined ? toMinor(a.hourly_wage as number, ctx.owner.currency) : undefined,
+      nominationFee: a.nomination_fee !== undefined ? toMinor(a.nomination_fee as number, ctx.owner.currency) : undefined,
+      commissionPercent: int(a.commission_percent),
     });
     let invite: string | null = null;
     const fresh = (await storage.getStaff(ctx.owner.id, member.id))!;
@@ -654,6 +775,77 @@ const IMPL: Record<string, Impl> = {
     const e = await correctEntryFor(ctx.owner, entry, { clockIn: str(a.clock_in) || undefined, clockOut: str(a.clock_out) || undefined });
     const { id: _i, staffId: _s, ...v } = entryView(ctx.owner, e, member.name, ctx.lang);
     return { ok: true, entry: v };
+  },
+  async add_expense(ctx, a) {
+    const e = await addExpenseFor(ctx.owner, { date: str(a.date) || undefined, amountMinor: toMinor(a.amount as number, ctx.owner.currency), category: str(a.category), memo: str(a.memo) });
+    return { ok: true, expense: { id: e.id, date: e.date, amount: money(e.amount, ctx.owner.currency, ctx.lang), category: categoryLabel(e.category, ctx.lang), memo: e.memo } };
+  },
+  async sell_ticket(ctx, a) {
+    const name = storage.cleanName(str(a.customer_name) ?? "");
+    if (!name) throw new ApiError("name_required");
+    const found = await storage.findCustomersByName(ctx.owner.id, name);
+    const exact = found.filter((c) => c.name === name);
+    const customer = exact.length === 1 ? exact[0] : found.length === 1 ? found[0] : found.length === 0 ? await storage.upsertCustomer(ctx.owner.id, name, "") : null;
+    if (!customer) return { ok: false, error: ctx.lang === "ja" ? `「${name}」さんが${found.length}人います。電話番号などで、どの方か教えてください` : `There are ${found.length} customers named ${name}. Which one?` };
+    if (a.ticket_type) {
+      const type = await requireTicketType(ctx, a.ticket_type);
+      const t = await sellFromType(ctx.owner, customer.id, type);
+      const { id: _i, customerId: _c, menuId: _m, ...v } = ticketView(t, ctx.owner, ctx.lang, todayFor(ctx.owner));
+      return { ok: true, customer: customer.name, ticket: v };
+    }
+    const kind = str(a.kind) === "credit" ? "credit" : "count";
+    const menu = a.menu_name ? await requireMenu(ctx, a.menu_name) : undefined;
+    const total = kind === "count" ? int(a.count) ?? 0 : toMinor(a.amount as number, ctx.owner.currency);
+    const t = await sellTicketFor(ctx.owner, { customerId: customer.id, kind, name: str(a.name) ?? "", total, priceMinor: toMinor(a.price as number, ctx.owner.currency), menuId: menu?.id ?? null, expiresOn: str(a.expires_on) || null });
+    const { id: _i, customerId: _c, menuId: _m, ...v } = ticketView(t, ctx.owner, ctx.lang, todayFor(ctx.owner));
+    return { ok: true, customer: customer.name, ticket: v };
+  },
+  async set_followup(ctx, a) {
+    const days = int(a.days);
+    if (days === undefined || days < 0 || days > 365) throw new ApiError("validation");
+    ctx.owner = await storage.updateOwner(ctx.owner.id, { followupAfterDays: days });
+    return { ok: true, followupAfterDays: days };
+  },
+  async get_capabilities(ctx) {
+    const strip = (xs: Ability[]) => xs.map(({ title, detail, say }) => ({ title, detail, say }));
+    const c = await capabilitiesFor(ctx.owner, ctx.lang);
+    return { ok: true, ready: strip(c.ready), always: strip(c.always), next: strip(c.next) };
+  },
+  async get_ticket_types(ctx) {
+    const menus = await storage.listMenus(ctx.owner.id);
+    const tickets = await storage.listTickets(ctx.owner.id);
+    return { ok: true, types: (await storage.listTicketTypes(ctx.owner.id)).map((t) => {
+      const { id: _i, ...v } = ticketTypeView(t, ctx.owner, ctx.lang, t.menuId ? storage.menuView(menus.find((m) => m.id === t.menuId) ?? menus[0], ctx.lang).name : null);
+      return { ...v, sold: tickets.filter((x) => x.typeId === t.id).length };
+    }) };
+  },
+  async create_ticket_type(ctx, a) {
+    const name = (str(a.name) ?? "").slice(0, 60);
+    const kind = str(a.kind) === "credit" ? "credit" : "count";
+    const total = kind === "count" ? int(a.count) ?? 0 : a.amount !== undefined ? toMinor(a.amount as number, ctx.owner.currency) : 0;
+    const price = toMinor(a.price as number, ctx.owner.currency);
+    const validDays = int(a.valid_days);
+    if (!name || !(total > 0) || !(price >= 0) || (validDays !== undefined && !(validDays > 0 && validDays <= 3650))) throw new ApiError("validation");
+    if (await storage.findTicketTypeByName(ctx.owner.id, name).then((t) => t?.name === name)) return { ok: false, error: ctx.lang === "ja" ? `「${name}」という種類はすでにあります` : `A type called "${name}" already exists.` };
+    const menu = a.menu_name ? await requireMenu(ctx, a.menu_name) : undefined;
+    const t = await storage.createTicketType({ ownerId: ctx.owner.id, name, kind, total, price, menuId: menu?.id ?? null, validDays: validDays ?? null });
+    const { id: _i, ...v } = ticketTypeView(t, ctx.owner, ctx.lang, menu ? storage.menuView(menu, ctx.lang).name : null);
+    return { ok: true, type: v };
+  },
+  async stop_ticket_type(ctx, a) {
+    const t = await requireTicketType(ctx, a.name);
+    await storage.updateTicketType(ctx.owner.id, t.id, { active: false });
+    return { ok: true, name: t.name };
+  },
+  async use_ticket(ctx, a) {
+    const row = await requireReservation(ctx, a.reservation_id);
+    const r = await useTicketFor(ctx.owner, row, undefined, a.amount !== undefined ? toMinor(a.amount as number, ctx.owner.currency) : undefined);
+    const { id: _i, customerId: _c, menuId: _m, ...t } = ticketView(r.ticket, ctx.owner, ctx.lang, todayFor(ctx.owner));
+    return { ok: true, reservation: view(ctx, r.reservation), ticket: t };
+  },
+  async delete_expense(ctx, a) {
+    if (!(await storage.deleteExpense(ctx.owner.id, int(a.expense_id) ?? 0))) throw new ApiError("not_found", 404);
+    return { ok: true };
   },
   async create_shop_group(ctx, a) {
     const g = await createGroupFor(ctx.owner, str(a.name) ?? "");
@@ -756,7 +948,10 @@ export async function describeAction(ctx: ToolContext, name: string, a: Record<s
         Array.isArray(a.menu_names) ? (ja ? `受けるコースを${(a.menu_names as string[]).join("と")}に` : `services: ${(a.menu_names as string[]).join(", ")}`) : "",
         a.role ? (ja ? `役割を${a.role === "manager" ? "マネージャー" : "スタッフ"}に` : `role ${a.role}`) : "",
         a.active === false || a.active === "false" ? (ja ? "在籍をやめる（ログインもできなくなる）" : "remove from the team (login stops)") : a.active !== undefined ? (ja ? "在籍に戻す" : "bring back to the team") : "",
-        bool(a.send_invite) ? (ja ? "ログインの招待を送り直す" : "resend the login invitation") : ""].filter(Boolean).join(ja ? "、" : ", ");
+        bool(a.send_invite) ? (ja ? "ログインの招待を送り直す" : "resend the login invitation") : "",
+        a.hourly_wage !== undefined ? (ja ? `時給を${fmt(a.hourly_wage)}に` : `hourly wage ${fmt(a.hourly_wage)}`) : "",
+        a.nomination_fee !== undefined ? (ja ? `指名料を${fmt(a.nomination_fee)}に` : `nomination fee ${fmt(a.nomination_fee)}`) : "",
+        a.commission_percent !== undefined ? (ja ? `歩合を${a.commission_percent}%に` : `commission ${a.commission_percent}%`) : ""].filter(Boolean).join(ja ? "、" : ", ");
       return ja ? `スタッフ「${a.staff_name}」を、${ch}` : `for staff "${a.staff_name}": ${ch}`;
     }
     case "confirm_attendance": {
@@ -768,6 +963,34 @@ export async function describeAction(ctx: ToolContext, name: string, a: Record<s
     case "correct_attendance": {
       const ch = [a.clock_in ? (ja ? `出勤を${a.clock_in}` : `in ${a.clock_in}`) : "", a.clock_out ? (ja ? `退勤を${a.clock_out}` : `out ${a.clock_out}`) : ""].filter(Boolean).join(ja ? "、" : ", ");
       return ja ? `${when(str(a.date))}の${a.staff_name}さんの打刻を、${ch}に直す` : `correct ${a.staff_name}'s clock record on ${when(str(a.date))}: ${ch}`;
+    }
+    case "create_ticket_type": {
+      const size = a.kind === "credit" ? (ja ? `${fmt(a.amount)}分の前払い` : `prepaid credit of ${fmt(a.amount)}`) : (ja ? `${a.menu_name ? `${a.menu_name}を` : ""}${a.count}回` : `${a.count} visits${a.menu_name ? ` of ${a.menu_name}` : ""}`);
+      const valid = a.valid_days ? (ja ? `、売った日から${a.valid_days}日有効` : `, valid ${a.valid_days} days`) : (ja ? "、期限なし" : ", no expiry");
+      return ja ? `回数券の種類「${a.name}」（${size}、${fmt(a.price)}${valid}）を作る` : `create the ticket type "${a.name}" (${size}, ${fmt(a.price)}${valid})`;
+    }
+    case "stop_ticket_type": return ja ? `回数券の種類「${a.name}」の販売をやめる` : `stop selling the ticket type "${a.name}"`;
+    case "sell_ticket": {
+      if (a.ticket_type) {
+        const tt = await storage.findTicketTypeByName(o.id, String(a.ticket_type));
+        const who = storage.cleanName(str(a.customer_name) ?? "");
+        if (tt) return ja ? `${who}さんに、${tt.name}を${money(tt.price, o.currency, ctx.lang).display}で売ったと記録する${tt.validDays ? `（${tt.validDays}日有効）` : ""}` : `record selling ${tt.name} to ${who} for ${money(tt.price, o.currency, ctx.lang).display}`;
+      }
+      const what = a.kind === "credit" ? (ja ? `前払い${fmt(a.amount)}分` : `prepaid credit of ${fmt(a.amount)}`) : (ja ? `${a.name || `${a.count}回券`}（${a.count}回）` : `${a.name || `${a.count}-visit ticket`} (${a.count} visits)`);
+      return ja ? `${storage.cleanName(str(a.customer_name) ?? "")}さんに、${what}を${fmt(a.price)}で売ったと記録する${a.expires_on ? `（期限は${when(str(a.expires_on))}）` : ""}` : `record selling ${what} to ${a.customer_name} for ${fmt(a.price)}`;
+    }
+    case "set_followup": return Number(a.days) > 0
+      ? (ja ? `前回の来店から${a.days}日あいたお客さんに、「そろそろいかがですか」のメールを送るようにする` : `email customers "time for your next visit?" ${a.days} days after their last visit`)
+      : (ja ? "次回の声かけのメールを送らないようにする" : "stop next-visit suggestion emails");
+    case "use_ticket": return ja ? `${await resLine(a.reservation_id)}の支払いに、回数券か前払いを使う` : `pay for ${await resLine(a.reservation_id)} with a ticket or prepaid credit`;
+    case "add_expense": {
+      const c = str(a.category);
+      const cat = categoryLabel(c ? c : guessCategory(str(a.memo) ?? ""), ctx.lang);
+      return ja ? `${when(str(a.date) || todayFor(o))}に、${cat}「${a.memo}」${fmt(a.amount)}を経費として記録する` : `record an expense on ${when(str(a.date) || todayFor(o))}: ${cat}, "${a.memo}", ${fmt(a.amount)}`;
+    }
+    case "delete_expense": {
+      const e = int(a.expense_id) ? await storage.getExpense(o.id, int(a.expense_id)!) : undefined;
+      return e ? (ja ? `${when(e.date)}の経費「${e.memo || categoryLabel(e.category, ctx.lang)}」${money(e.amount, o.currency, ctx.lang).display}を消す` : `delete the expense "${e.memo}" (${money(e.amount, o.currency, ctx.lang).display}) on ${when(e.date)}`) : (ja ? "経費を消す" : "delete an expense");
     }
     case "create_shop_group": return ja ? `集計を見せ合う店舗グループ${a.name ? `「${a.name}」` : ""}を作る` : `create a shop group${a.name ? ` "${a.name}"` : ""} for sharing totals`;
     case "join_shop_group": return ja ? `参加コード${String(a.code).toUpperCase()}の店舗グループに入り、売り上げと件数を見せ合う` : `join the shop group with code ${String(a.code).toUpperCase()} and share totals`;
@@ -794,6 +1017,8 @@ export async function describeAction(ctx: ToolContext, name: string, a: Record<s
         buffer_minutes: ["施術間の空き時間", "gap between sessions", "分", " minutes"], slot_step_minutes: ["案内の刻み", "time step", "分", " minutes"],
         max_days_ahead: ["お客さんが予約できる先", "booking window", "日先まで", " days ahead"], min_hours_before: ["お客さんの予約の締め切り", "booking cutoff", "時間前まで", " hours before"],
         free_cancel_hours_before: ["全額返金の期限", "full-refund deadline", "時間前まで", " hours before"], allow_card_payment: ["カード前払いの許可", "card prepayment", "", ""],
+        allow_nomination: ["お客さんの指名", "customer nominations", "", ""], clock_tolerance_minutes: ["打刻が予定どおりとみなせる幅", "on-plan clock window", "分", " minutes"],
+        plan_horizon_days: ["勤務の予定を入れられる先", "work plan horizon", "日先まで", " days ahead"],
       };
       const ch = Object.entries(a).filter(([k, v]) => k in L && v !== undefined && v !== null).map(([k, v]) => `${L[k][ja ? 0 : 1]}${ja ? "を" : ": "}${typeof v === "boolean" ? (v ? (ja ? "あり" : "allowed") : (ja ? "なし" : "not allowed")) : `${v}${L[k][ja ? 2 : 3]}`}${ja ? "に" : ""}`).join(ja ? "、" : ", ");
       return ja ? `受付ルールを${ch}変更する` : `change booking rules: ${ch}`;
@@ -817,6 +1042,8 @@ export async function describeAction(ctx: ToolContext, name: string, a: Record<s
 export async function validateToolArgs(ctx: ToolContext, name: string, a: Record<string, unknown>): Promise<string | null> {
   const spec = TOOL_SPECS.find((t) => t.function.name === name);
   const required = (spec?.function.parameters?.required as string[] | undefined) ?? [];
+  // 登録前のお店では、確認を聞く前に断る（「はい」と言ったあとに断らない）
+  if (!ctx.owner.email && REGISTERED_TOOLS.has(name)) return errorMessage("registration_required", ctx.lang);
   const missing = required.filter((k) => a[k] === undefined || a[k] === null || String(a[k]).trim() === "");
   if (missing.length) return ctx.lang === "ja" ? `引数が足りません: ${missing.join(", ")}。履歴やツールで調べてから、もう一度呼んでください` : `Missing arguments: ${missing.join(", ")}. Look them up (history or tools) and call again.`;
   try {
@@ -824,6 +1051,10 @@ export async function validateToolArgs(ctx: ToolContext, name: string, a: Record
     if ("customer_id" in a) await requireCustomer(ctx, a.customer_id);
     if (a.staff_name && name !== "update_staff") await optionalStaff(ctx, a.staff_name);
     if (name === "update_menu" || (["create_reservation", "update_reservation", "create_recurring_reservations"].includes(name) && a.menu_name)) await requireMenu(ctx, a.menu_name);
+    if (name === "sell_ticket") {
+      if (a.ticket_type) await requireTicketType(ctx, a.ticket_type);
+      else if (!a.kind || a.price === undefined) return ctx.lang === "ja" ? "種類（ticket_type）か、kind と price を渡してください" : "Pass ticket_type, or kind and price.";
+    }
     if (name === "create_recurring_reservations") {
       if (!a.menu_name && !a.end_time) return errorMessage("end_or_menu_required", ctx.lang);
       if (!isValidDate(String(a.first_date))) return errorMessage("invalid_date", ctx.lang);

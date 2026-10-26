@@ -24,7 +24,7 @@ export function stripeConfigured(): boolean {
 }
 
 let _stripe: Stripe | null = null;
-function stripe(): Stripe {
+export function stripe(): Stripe {
   assertStripeTestKeys();
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("Stripe is not configured");
@@ -94,9 +94,12 @@ export async function handleWebhook(rawBody: Buffer, signature: string | undefin
   if (!secret) throw new Error("STRIPE_WEBHOOK_SECRET is not set");
   if (!signature) throw new Error("missing stripe-signature header");
   const event = stripe().webhooks.constructEvent(rawBody, signature, secret);
+  // 月額の請求（定期課金）の知らせは billing.ts で受ける
+  const { handleBillingEvent } = await import("./billing");
+  await handleBillingEvent(event);
   if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
     const session = event.data.object as Stripe.Checkout.Session;
-    if (session.payment_status === "paid") {
+    if (session.mode !== "subscription" && session.payment_status === "paid") {
       await markCardPaid(session.id, typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null);
     }
   }

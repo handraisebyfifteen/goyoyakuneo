@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import * as storage from "./storage";
-import { registerAuthRoutes, requireOwner, type AuthedRequest } from "./auth";
+import { registerAuthRoutes, requireOwner, requireRegistered, type AuthedRequest } from "./auth";
 import { ApiError, sendError } from "./errors";
 import { settingsPatchSchema, type Owner, type Language } from "@shared/schema";
 import { cancelPolicyText, normalizeLang } from "@shared/i18n";
@@ -16,6 +16,12 @@ import { calendarFeed, calendarTokenFor } from "./calendar";
 import { registerStaffRoutes } from "./staff";
 import { registerGroupRoutes } from "./groups";
 import { registerAttendanceRoutes } from "./attendance";
+import { registerApiRoutes } from "./api";
+import { registerBooksRoutes } from "./books";
+import { registerFollowupRoutes } from "./followup";
+import { registerBillingRoutes } from "./billing";
+import { registerTicketRoutes, registerPassRoutes } from "./tickets";
+import { registerCapabilityRoutes } from "./capabilities";
 
 type Handler = (req: Request, res: Response, lang: Language) => Promise<void>;
 
@@ -152,8 +158,18 @@ export function registerRoutes(app: Express) {
     res.json({ ok: true, ...(await cancelReservationFor(owner, row, lang)) });
   }));
 
+  // ご予約ちゃんが会話で覚えたこと（見る・消す）
+  app.get("/api/owner/memories", requireOwner, wrap(async (req, res) => {
+    const owner = ownerOf(req);
+    res.json({ ok: true, memories: (await storage.listMemories(owner.id)).map((m) => ({ id: m.id, content: m.content, createdAt: m.createdAt.toISOString() })).reverse() });
+  }));
+  app.delete("/api/owner/memories/:id", requireOwner, wrap(async (req, res) => {
+    if (!(await storage.deleteMemory(ownerOf(req).id, Number(req.params.id)))) throw new ApiError("not_found", 404);
+    res.json({ ok: true });
+  }));
+
   // カレンダー購読用の URL（Google・iPhone・Outlook に予約を映す。一方通行）
-  app.get("/api/owner/calendar-link", requireOwner, wrap(async (req, res) => {
+  app.get("/api/owner/calendar-link", requireOwner, requireRegistered, wrap(async (req, res) => {
     const token = await calendarTokenFor(ownerOf(req));
     res.json({ ok: true, path: `/api/public/calendar/${token}.ics` });
   }));
@@ -204,7 +220,8 @@ export function registerRoutes(app: Express) {
 
   async function shopBySlug(slug: string): Promise<Owner> {
     const owner = await storage.getOwnerBySlug(slug);
-    if (!owner) throw new ApiError("not_found", 404);
+    // 登録前のお店は、お客さんに予約ページを見せない（端末をなくすと、お客さんの予約ごと消えてしまうため）
+    if (!owner || !owner.email) throw new ApiError("not_found", 404);
     return owner;
   }
 
@@ -351,6 +368,13 @@ export function registerRoutes(app: Express) {
   registerStaffRoutes(app);
   registerGroupRoutes(app);
   registerAttendanceRoutes(app);
+  registerApiRoutes(app);
+  registerBooksRoutes(app);
+  registerFollowupRoutes(app);
+  registerBillingRoutes(app);
+  registerTicketRoutes(app);
+  registerPassRoutes(app);
+  registerCapabilityRoutes(app);
 
   app.use("/api", (_req, res) => {
     res.status(404).json({ ok: false, code: "not_found" });

@@ -27,19 +27,30 @@ export const DEFAULT_HOURS: BusinessHours = {
 };
 
 /**
- * 設定の進み具合。最初にまとめて聞かず、パートナー（声のパネル）が1日に1つずつ聞いて埋める。
- * done: 決まった項目 / skipped: 「聞かないで」と言われた項目（"all" なら全部） / asks: 聞いた回数 / askedOn: 最後に聞いた日
- * lastAsked: 聞いたまま、まだ答えをもらっていない項目
+ * 設定の進み具合。最初にまとめて聞かず、パートナー（声のパネル）が使い始めのうちに続けて聞いて埋める。
+ * done: 決まった項目 / skipped: 「聞かないで」と言われた項目（"all" なら質問をやめて、残りの数だけ知らせる） / asks: 聞いた回数
+ * askedOn: 最後に聞いた日 / askedToday: その日に聞いた項目（同じ日に同じことを聞き直さない）
+ * lastAsked: 聞いたまま、まだ答えをもらっていない項目 / postponedOn: 「あとで」と言われた日（その日はもう聞かない）
  * menuSuggested: 「メニューに登録しますか」と勧めた所要時間（分）。同じ長さでは二度勧めない
  */
-export type SetupState = { done: string[]; skipped: string[]; asks: Record<string, number>; askedOn?: string; lastAsked?: string; menuSuggested?: number[] };
+export type SetupState = { done: string[]; skipped: string[]; asks: Record<string, number>; askedOn?: string; askedToday?: string[]; lastAsked?: string; postponedOn?: string; menuSuggested?: number[] };
 export const EMPTY_SETUP: SetupState = { done: [], skipped: [], asks: {} };
+
+/**
+ * お知らせの受け取り方。会話の中で決まる（AI が聞いたり、オーナーが言ったりしたときに set_notice_preferences で）。
+ * attendance: 打刻のお知らせ（all=全部、checks=確認が必要なものと予定の変更だけ、off=伝えない）
+ * attendanceEmail: 確認が必要な打刻を、その場でオーナーにメールでも知らせるか
+ */
+export type NoticePrefs = { attendance: "all" | "checks" | "off"; attendanceEmail: boolean };
+export const DEFAULT_NOTICE: NoticePrefs = { attendance: "all", attendanceEmail: false };
+/** 打刻が「予定どおり」とみなせる幅として選べる分数 */
+export const CLOCK_TOLERANCES = [15, 30] as const;
 
 export const LOGIN_METHODS = ["password", "passphrase", "both"] as const;
 export const RESERVATION_STATUSES = ["confirmed", "cancelled", "completed", "no_show"] as const;
 export const SOURCES = ["web", "owner"] as const;
 export const PAYMENT_METHODS = ["card", "onsite"] as const;
-export const PAYMENT_STATUSES = ["unpaid", "paid", "onsite_pending", "onsite_received", "refunded"] as const;
+export const PAYMENT_STATUSES = ["unpaid", "paid", "onsite_pending", "onsite_received", "refunded", "ticket"] as const;
 export const LANGUAGES = ["ja", "en"] as const;
 /** スタッフの権限。staff は自分の予定と打刻だけ、manager は全員の予定も見られる */
 export const STAFF_ROLES = ["staff", "manager"] as const;
@@ -47,9 +58,12 @@ export type Language = (typeof LANGUAGES)[number];
 
 export const owners = pgTable("owners", {
   id: serial("id").primaryKey(),
-  email: text("email").notNull().unique(),
+  /** 登録する前（この端末だけのお店）は null。登録するとログインに使う */
+  email: text("email").unique(),
   passwordHash: text("password_hash"),
   passphraseHash: text("passphrase_hash"),
+  /** 登録する前のお店に入るための鍵のハッシュ。鍵そのものは端末にだけ保存する。登録したら消す */
+  deviceKeyHash: text("device_key_hash").unique(),
   loginMethod: text("login_method").notNull().default("both"),
   shopNameJa: text("shop_name_ja").notNull().default(""),
   shopNameEn: text("shop_name_en").notNull().default(""),
@@ -80,6 +94,17 @@ export const owners = pgTable("owners", {
   allowNomination: boolean("allow_nomination").notNull().default(false),
   /** 打刻が「予定どおり」とみなせる幅（予定の前後、分） */
   clockToleranceMinutes: integer("clock_tolerance_minutes").notNull().default(30),
+  /** スタッフが勤務の予定を何日先まで入れられるか */
+  planHorizonDays: integer("plan_horizon_days").notNull().default(31),
+  /** 次回の声かけ：前回の来店から何日あいたら「そろそろいかがですか」のメールを送るか（0 なら送らない） */
+  followupAfterDays: integer("followup_after_days").notNull().default(0),
+  /** 月額の請求（Stripe の定期課金）。基本料金＋ログインできるスタッフの人数分 */
+  stripeCustomerId: text("stripe_customer_id"),
+  subscriptionId: text("subscription_id"),
+  subscriptionStatus: text("subscription_status"),
+  subscriptionSeats: integer("subscription_seats").notNull().default(0),
+  /** お知らせの受け取り方。まだ決まっていなければ null（初期値で動き、AI が一度聞く） */
+  noticePrefs: jsonb("notice_prefs").$type<NoticePrefs>(),
   /** 店舗グループ（集計だけを見せ合う店どうし）。1店舗1アカウントのまま */
   groupId: integer("group_id"),
   setupState: jsonb("setup_state").$type<SetupState>().notNull().default(EMPTY_SETUP),
@@ -96,6 +121,10 @@ export const customers = pgTable(
     email: text("email"),
     /** オーナーのメモ（「腰が悪い」「強めが好み」など）。日付つきで1行ずつ足していく */
     notes: text("notes").notNull().default(""),
+    /** 次回の声かけ：最後に送った時刻、配信を止めたか、止めるためのリンクの文字列 */
+    followedUpAt: timestamp("followed_up_at", { withTimezone: true }),
+    followupOptOut: boolean("followup_opt_out").notNull().default(false),
+    unsubscribeToken: text("unsubscribe_token").unique(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ ownerPhone: uniqueIndex("customers_owner_phone").on(t.ownerId, t.phone).where(sql`${t.phone} <> ''`) }),
@@ -156,6 +185,9 @@ export const reservations = pgTable(
     staffId: integer("staff_id"),
     staffName: text("staff_name").notNull().default(""),
     nominated: boolean("nominated").notNull().default(false),
+    /** 回数券・前払いで払ったときの券。使った分（回数券は1回、前払いは金額）を ticketUsed に残す */
+    ticketId: integer("ticket_id"),
+    ticketUsed: integer("ticket_used").notNull().default(0),
   },
   (t) => ({
     ownerNumber: uniqueIndex("reservations_owner_number").on(t.ownerId, t.number),
@@ -185,6 +217,10 @@ export const staff = pgTable("staff", {
   inviteExpiresAt: timestamp("invite_expires_at", { withTimezone: true }),
   active: boolean("active").notNull().default(true),
   sortOrder: integer("sort_order").notNull().default(0),
+  /** 給与：時給・指名1件あたりの指名料（最小単位）、担当した施術の売り上げに対する歩合（%） */
+  hourlyWage: integer("hourly_wage").notNull().default(0),
+  nominationFee: integer("nomination_fee").notNull().default(0),
+  commissionPercent: integer("commission_percent").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -254,6 +290,97 @@ export const attendanceEvents = pgTable(
   },
   (t) => ({ ownerAt: index("attendance_events_owner_at").on(t.ownerId, t.at) }),
 );
+
+/**
+ * ご予約ちゃんが会話で覚えたこと（オーナーの好み・決まりごと・お店の事情）。次の会話から使う。
+ * 合言葉やカード番号などは覚えない。オーナーは管理画面で見て消せる
+ */
+export const ownerMemories = pgTable("owner_memories", {
+  id: serial("id").primaryKey(),
+  ownerId: integer("owner_id").notNull().references(() => owners.id),
+  content: text("content").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * 券の種類（例：60分5回券 27,000円、90日有効）。設定で一度決めておけば、売るときは種類を選ぶだけ。
+ * AI の相談役と相談して決めることもできる。kind / total / price は customerTickets と同じ意味、validDays は売った日からの有効日数
+ */
+export const ticketTypes = pgTable("ticket_types", {
+  id: serial("id").primaryKey(),
+  ownerId: integer("owner_id").notNull().references(() => owners.id),
+  name: text("name").notNull(),
+  kind: text("kind").notNull(),
+  menuId: integer("menu_id"),
+  total: integer("total").notNull(),
+  price: integer("price").notNull(),
+  validDays: integer("valid_days"),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * 回数券・前払い。kind が count なら total / remaining は回数、credit なら金額（最小単位）。
+ * 売ったときの金額 price を、売った日（soldDate）の売り上げにする。使った日は売り上げにしない（二重に数えない）
+ * token は QR コードとお客さん向けのページ（/t/:token）に使う秘密の文字列。見せるだけでは使えず、使うのはオーナーの読み取りから
+ */
+export const customerTickets = pgTable("customer_tickets", {
+  id: serial("id").primaryKey(),
+  ownerId: integer("owner_id").notNull().references(() => owners.id),
+  customerId: integer("customer_id").notNull().references(() => customers.id),
+  kind: text("kind").notNull(),
+  name: text("name").notNull(),
+  menuId: integer("menu_id"),
+  total: integer("total").notNull(),
+  remaining: integer("remaining").notNull(),
+  price: integer("price").notNull(),
+  soldDate: text("sold_date").notNull(),
+  expiresOn: text("expires_on"),
+  active: boolean("active").notNull().default(true),
+  token: text("token").unique(),
+  /** どの種類から売ったか（自由に作った券なら null） */
+  typeId: integer("type_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** 経費の科目（確定申告の収支内訳書・青色申告決算書の科目に合わせる） */
+export const EXPENSE_CATEGORIES = {
+  supplies: { ja: "消耗品費", en: "Supplies" }, rent: { ja: "地代家賃", en: "Rent" }, utilities: { ja: "水道光熱費", en: "Utilities" },
+  communication: { ja: "通信費", en: "Phone and internet" }, travel: { ja: "旅費交通費", en: "Travel" }, advertising: { ja: "広告宣伝費", en: "Advertising" },
+  entertainment: { ja: "接待交際費", en: "Entertainment" }, outsourcing: { ja: "外注工賃", en: "Outsourcing" }, fees: { ja: "支払手数料", en: "Fees" },
+  training: { ja: "研修費", en: "Training" }, repairs: { ja: "修繕費", en: "Repairs" }, insurance: { ja: "損害保険料", en: "Insurance" }, other: { ja: "雑費", en: "Other" },
+} as const;
+export type ExpenseCategory = keyof typeof EXPENSE_CATEGORIES;
+
+/** 経費。date はオーナーの時間帯の日付、amount は最小単位の整数 */
+export const expenses = pgTable(
+  "expenses",
+  {
+    id: serial("id").primaryKey(),
+    ownerId: integer("owner_id").notNull().references(() => owners.id),
+    date: text("date").notNull(),
+    amount: integer("amount").notNull(),
+    category: text("category").notNull(),
+    memo: text("memo").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ ownerDate: index("expenses_owner_date").on(t.ownerId, t.date) }),
+);
+
+/**
+ * API キー。外の道具（会計・給与・自作のツールなど）から、この店のデータを読むための鍵。
+ * キーそのものは発行したときに一度だけ見せ、ここにはハッシュと先頭の数文字だけを残す。読み取り専用
+ */
+export const apiKeys = pgTable("api_keys", {
+  id: serial("id").primaryKey(),
+  ownerId: integer("owner_id").notNull().references(() => owners.id),
+  name: text("name").notNull(),
+  prefix: text("prefix").notNull(),
+  keyHash: text("key_hash").notNull().unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+});
 
 /** 店舗グループ。参加コードを知っている店が入れる。見せ合うのは集計だけ */
 export const shopGroups = pgTable("shop_groups", {
@@ -334,13 +461,18 @@ export type TimeEntry = typeof timeEntries.$inferSelect;
 export type Shift = typeof shifts.$inferSelect;
 export type AttendanceEvent = typeof attendanceEvents.$inferSelect;
 export type ShopGroup = typeof shopGroups.$inferSelect;
+export type OwnerMemory = typeof ownerMemories.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type Expense = typeof expenses.$inferSelect;
+export type CustomerTicket = typeof customerTickets.$inferSelect;
+export type TicketType = typeof ticketTypes.$inferSelect;
 /** 画面やAIに渡すスタッフの情報（パスワードや招待の文字列を含まない） */
 export type PublicStaff = Omit<Staff, "passwordHash" | "inviteToken"> & { canLogin: boolean; invited: boolean };
 export type ChatMessage = typeof chatMessages.$inferSelect;
 export type VoiceSession = typeof voiceSessions.$inferSelect;
 
 /** 画面やAIに渡すオーナー情報（ハッシュを含まない） */
-export type PublicOwner = Omit<Owner, "passwordHash" | "passphraseHash"> & { hasPassphrase: boolean; hasPassword: boolean };
+export type PublicOwner = Omit<Owner, "passwordHash" | "passphraseHash" | "deviceKeyHash"> & { hasPassphrase: boolean; hasPassword: boolean; registered: boolean };
 
 export const insertMenuSchema = createInsertSchema(menus).omit({ id: true, ownerId: true, currency: true });
 
@@ -373,7 +505,10 @@ export const settingsPatchSchema = z.object({
   freeCancelHoursBefore: z.number().int().min(0).max(720).optional(),
   allowCardPayment: z.boolean().optional(),
   allowNomination: z.boolean().optional(),
-  clockToleranceMinutes: z.number().int().min(0).max(180).optional(),
+  clockToleranceMinutes: z.union([z.literal(15), z.literal(30)]).optional(),
+  planHorizonDays: z.union([z.literal(7), z.literal(14), z.literal(31), z.literal(62)]).optional(),
+  noticePrefs: z.object({ attendance: z.enum(["all", "checks", "off"]), attendanceEmail: z.boolean() }).optional(),
+  followupAfterDays: z.number().int().min(0).max(365).optional(),
   slug: z.string().regex(/^[a-z0-9-]{3,40}$/).optional(),
   onboardingDone: z.boolean().optional(),
 });

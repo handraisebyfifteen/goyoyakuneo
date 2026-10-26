@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n, type Lang } from "@/lib/i18n";
 import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, parseSpokenEmail, parseSpokenPhone, parseSpokenNumber, parseSpokenTime, getVoicePrefs, takeSpeakError, unlockSpeech, SpeechNotAllowed } from "@/lib/speech";
+import { flashSignal, setSignal, type SignalState } from "@/lib/signal";
 
 export type Choice = { value: string; label: string; aliases?: string[] };
 export type Step = {
@@ -212,10 +213,12 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
     const err = await onComplete({ ...valuesRef.current });
     if (err) {
       setError(err);
+      flashSignal("ng");
       await say(err);
       return false;
     }
     setStatus("done");
+    flashSignal("ok");
     return true;
   }, [onComplete, say]);
 
@@ -250,9 +253,9 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
         const sw = step.type === "choice" ? null : languageSwitch(ans.text);
         if (sw) { setLang(sw); return; }
         const parsed = parseAnswer(step, ans.text, ans.fromVoice);
-        if ("error" in parsed) { setError(parsed.error); await say(parsed.error); continue; }
+        if ("error" in parsed) { setError(parsed.error); flashSignal("ng"); await say(parsed.error); continue; }
         const v = step.validate?.(parsed.value);
-        if (v) { setError(v); await say(v); continue; }
+        if (v) { setError(v); flashSignal("ng"); await say(v); continue; }
         if (!ans.fromVoice) { valuesRef.current[step.key] = parsed.value; committed = true; break; }
 
         // 声で答えたときだけ、聞き間違いがないか確認する
@@ -281,6 +284,17 @@ export function VoiceConversation({ steps, intro, mode, onModeChange, onComplete
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSteps, finish, getAnswer, lang, runBefore, say, setLang, t]);
+
+  // 少し見える人への合図（画面のふちの光と振動）。はい/いいえを聞いている間は「確認待ち」として知らせる
+  useEffect(() => {
+    const askingYesNo = confirming || activeSteps()[index]?.type === "yesno";
+    const s: SignalState = status === "listening" ? (askingYesNo ? "confirm" : "listen")
+      : status === "speaking" ? "speak"
+      : status === "submitting" ? "think"
+      : "idle";
+    setSignal(s);
+  }, [status, confirming, index, activeSteps]);
+  useEffect(() => () => setSignal("idle"), []);
 
   // 会話の開始。言語が変わったら最初からやり直す（送信中・完了後は何もしない）
   useEffect(() => {
