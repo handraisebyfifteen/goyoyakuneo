@@ -201,6 +201,7 @@ const ja: Dict = {
   couponCodeLabel: "コード（例：SPRING10）", couponKind: "割引", couponAmount: "円引き", couponValue: "割引の大きさ", couponCreate: "クーポンを作る",
   canDoTitle: "今できること", canDoReady: "登録・設定してあるからできること", canDoReadyNone: "まだありません。お店を登録したり、メニューを決めたりすると、ここに増えていきます。",
   canDoNext: "設定するとできること", canDoAlways: "いつでも声でできること（{n}）", canDoSay: "言い方の例：「{say}」", canDoAuto: "自動で動きます", canDoScreen: "「開く」から画面で使います", canDoOpen: "開く", canDoOpenLabel: "{title}を開く",
+  moreTitle: "その他（予約・売り上げ・設定など）", voiceMore: "文字で入力する・会話の記録", startSimple: "はじめる",
   growTitle: "お店を広げる・設定", growHint: "スタッフ、回数券、メールでの声かけ、外部カレンダー、店舗グループ、APIキー、ご利用料金など。必要になったら開いてください。", thisShop: "（この店）", bookingsN: "{n}件", reservationsCol: "予約", noShows: "無断キャンセル",
 };
 
@@ -389,6 +390,7 @@ const en: Dict = {
   couponCodeLabel: "Code (e.g. SPRING10)", couponKind: "Discount", couponAmount: "Amount", couponValue: "Size", couponCreate: "Create coupon",
   canDoTitle: "What you can do now", canDoReady: "Ready because it's set up", canDoReadyNone: "Nothing yet. Registering your shop or adding a service adds more here.",
   canDoNext: "Set this up to do more", canDoAlways: "Always available by voice ({n})", canDoSay: "Try saying: “{say}”", canDoAuto: "Runs automatically", canDoScreen: "Use it on screen with Open", canDoOpen: "Open", canDoOpenLabel: "Open: {title}",
+  moreTitle: "More (bookings, sales, settings)", voiceMore: "Type instead, conversation log", startSimple: "Start",
   growTitle: "Grow your shop and settings", growHint: "Staff, tickets, email suggestions, external calendar, shop group, API keys, subscription. Open when you need them.", thisShop: " (this shop)", bookingsN: "{n} bookings", reservationsCol: "Bookings", noShows: "No-shows",
 };
 

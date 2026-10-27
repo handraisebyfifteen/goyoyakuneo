@@ -357,10 +357,21 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
   const phaseLabel = phase === "listening" ? t("listening") : phase === "thinking" ? t("thinking") : phase === "speaking" ? t("speaking")
     : phase === "confirm" ? t("waitingYesNo") : phase === "passphrase" ? t("passphraseListening") : phase === "camera" ? t("cameraHint") : phase === "reading" ? t("cameraReading") : t("micHint");
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  const showTypedOpen = phase === "passphrase" || !sttSupported() || !!aiOff;
+  const typedForm = (
+    <form onSubmit={submitTyped} className="flex flex-col sm:flex-row gap-3 text-left">
+      <div className="flex-1">
+        <Label htmlFor="voice-typed">{phase === "passphrase" ? t("passphraseTyped") : t("typeHere")}</Label>
+        <Input id="voice-typed" ref={inputRef} type={phase === "passphrase" ? "password" : "text"} aria-describedby={phase === "passphrase" ? "voice-last" : undefined} autoComplete="off" value={typed}
+          onChange={(e) => setTyped(e.target.value)} disabled={busy || !!aiOff} data-testid="input-voice-text" />
+      </div>
+      <Button type="submit" size="lg" className="sm:self-end" disabled={busy || !!aiOff} data-testid="button-voice-send">{t("send")}</Button>
+    </form>
+  );
 
   return (
-    <section aria-labelledby="voice-heading" className="rounded-xl border-2 bg-card p-5 sm:p-8 text-center space-y-5" data-testid="voice-panel">
-      <h2 id="voice-heading" className="text-xl font-bold">{t("voiceTitle")}</h2>
+    <section aria-labelledby="voice-heading" className="py-6 sm:py-10 text-center space-y-6" data-testid="voice-panel">
+      <h2 id="voice-heading" className="sr-only">{t("voiceTitle")}</h2>
 
       {aiOff ? <p role="alert" className="text-destructive font-semibold">{t("aiNotConfigured")}</p> : null}
 
@@ -399,41 +410,38 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
         </div>
       )}
 
-      <div className="text-left rounded-lg border-2 p-4 min-h-24" aria-live="polite" aria-atomic="true" data-testid="text-assistant-live">
-        <p className="text-sm text-muted-foreground mb-1">{lastAssistant?.model === "consult" ? t("advisorLabel") : t("assistantLabel")}</p>
-        <p id="voice-last" className="text-xl font-semibold whitespace-pre-wrap">{lastAssistant?.text ?? t("voiceEmpty")}</p>
+      <div className="mx-auto max-w-xl min-h-16 text-left" aria-live="polite" aria-atomic="true" data-testid="text-assistant-live">
+        <p className="sr-only">{lastAssistant?.model === "consult" ? t("advisorLabel") : t("assistantLabel")}</p>
+        <p id="voice-last" className="text-lg font-semibold whitespace-pre-wrap">{lastAssistant?.text ?? ""}</p>
         {error && <p className="mt-2 text-destructive font-semibold" role="alert">{error}</p>}
       </div>
 
-      <form onSubmit={submitTyped} className="flex flex-col sm:flex-row gap-3 text-left">
-        <div className="flex-1">
-          <Label htmlFor="voice-typed">{phase === "passphrase" ? t("passphraseTyped") : t("typeHere")}</Label>
-          <Input id="voice-typed" ref={inputRef} type={phase === "passphrase" ? "password" : "text"} aria-describedby={phase === "passphrase" ? "voice-last" : undefined} autoComplete="off" value={typed}
-            onChange={(e) => setTyped(e.target.value)} disabled={busy || !!aiOff} data-testid="input-voice-text" />
+      {/* 声が使えないときと合言葉のときは、文字の入力を表に出す。それ以外はたたんでおく */}
+      {showTypedOpen && typedForm}
+      <details className="text-left mx-auto max-w-xl" data-testid="details-voice-more">
+        <summary className="cursor-pointer text-sm text-muted-foreground">{t("voiceMore")}</summary>
+        <div className="mt-4 space-y-5">
+          {!showTypedOpen && typedForm}
+          <div className="flex flex-wrap items-center justify-center gap-4 text-sm">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" className="h-5 w-5" checked={continuous} onChange={(e) => setContinuous(e.target.checked)} data-testid="checkbox-continuous" />
+              {t("continuousMode")}
+            </label>
+            <span className="text-muted-foreground">{t("spaceHint")}</span>
+          </div>
+
+          <SignalSettings />
+
+          <h3 className="font-semibold">{t("transcript")}</h3>
+          <ol className="mt-3 space-y-2" aria-label={t("transcript")}>
+            {messages.map((m) => (
+              <li key={m.id} className={`rounded-md px-3 py-2 ${m.role === "user" ? "bg-secondary" : m.model === "consult" ? "bg-accent text-accent-foreground" : "border-2"}`} data-testid={`msg-${m.role}`}>
+                <span className="text-xs text-muted-foreground block">{m.role === "user" ? t("you") : m.model === "consult" ? t("advisorLabel") : t("assistantLabel")}</span>
+                {m.text}
+              </li>
+            ))}
+          </ol>
         </div>
-        <Button type="submit" size="lg" className="sm:self-end" disabled={busy || !!aiOff} data-testid="button-voice-send">{t("send")}</Button>
-      </form>
-
-      <div className="flex flex-wrap items-center justify-center gap-4 text-sm">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" className="h-5 w-5" checked={continuous} onChange={(e) => setContinuous(e.target.checked)} data-testid="checkbox-continuous" />
-          {t("continuousMode")}
-        </label>
-        <span className="text-muted-foreground">{t("spaceHint")}</span>
-      </div>
-
-      <SignalSettings />
-
-      <details className="text-left">
-        <summary className="cursor-pointer font-semibold">{t("transcript")}</summary>
-        <ol className="mt-3 space-y-2" aria-label={t("transcript")}>
-          {messages.map((m) => (
-            <li key={m.id} className={`rounded-md px-3 py-2 ${m.role === "user" ? "bg-secondary" : m.model === "consult" ? "bg-accent text-accent-foreground" : "border-2"}`} data-testid={`msg-${m.role}`}>
-              <span className="text-xs text-muted-foreground block">{m.role === "user" ? t("you") : m.model === "consult" ? t("advisorLabel") : t("assistantLabel")}</span>
-              {m.text}
-            </li>
-          ))}
-        </ol>
       </details>
     </section>
   );

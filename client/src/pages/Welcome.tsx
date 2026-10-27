@@ -48,17 +48,17 @@ export default function Welcome() {
           <p className="text-muted-foreground mt-2 text-lg">{t("tagline")}</p>
           {needsGesture && <p className="mt-3" role="status">{t("pressAnyKey")}</p>}
         </div>
-        <div className="flex flex-col gap-4 max-w-sm mx-auto">
+        <div className="flex flex-col items-center gap-4 max-w-sm mx-auto">
+          {/* ボタンは一つだけ。この端末のお店があれば開き、なければ新しく始める */}
           {owner ? (
-            <Button size="lg" asChild><Link href="/admin" data-testid="link-admin">{t("adminTitle")}</Link></Button>
+            <Button size="lg" className="h-16 w-full text-xl" asChild><Link href="/admin" data-testid="link-admin">{t("startSimple")}</Link></Button>
           ) : (
             <>
-              <Button size="lg" onClick={begin} disabled={busy} data-testid="button-start">{hasDeviceShop ? t("openDeviceShop") : t("startNow")}</Button>
-              <Button size="lg" variant="outline" asChild><Link href="/login" data-testid="link-login">{t("ownerLogin")}</Link></Button>
+              <Button size="lg" className="h-16 w-full text-xl" onClick={begin} disabled={busy} data-testid="button-start">{t("startSimple")}</Button>
               {error && <p role="alert" className="text-destructive">{error}</p>}
+              <Button variant="link" asChild><Link href="/login" data-testid="link-login">{t("ownerLogin")}</Link></Button>
             </>
           )}
-          <Button size="lg" variant="secondary" asChild><Link href="/lookup" data-testid="link-lookup">{t("customerLookup")}</Link></Button>
         </div>
       </div>
     </Layout>

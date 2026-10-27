@@ -61,6 +61,8 @@ export default function Admin() {
   const hasCoupons = !!couponsQ.data?.coupons.some((c) => c.usable);
   const [scanOpen, setScanOpen] = useState(false);
   const [growOpen, setGrowOpen] = useState(() => typeof window !== "undefined" && ["billing", "cardpay"].some((k) => new URLSearchParams(window.location.search).has(k)));
+  // 画面はマイクボタンだけにして、予約・売り上げ・設定などは「その他」にしまう
+  const [moreOpen, setMoreOpen] = useState(growOpen);
   const calendar = useQuery<{ path: string }>({ queryKey: ["/api/owner/calendar-link"], enabled: !!owner?.registered && growOpen });
   const summary = useQuery<Summary>({ queryKey: [`/api/owner/summary?lang=${lang}`], enabled: !!owner });
 
@@ -74,7 +76,7 @@ export default function Admin() {
     let tries = 30;
     const go = () => {
       const h = document.querySelector<HTMLElement>(`[data-section="${section}"] h2`);
-      if (!h || h.closest("details:not([open])")) { setGrowOpen(true); if (tries-- > 0) setTimeout(go, 100); return; }
+      if (!h || h.closest("details:not([open])")) { setMoreOpen(true); setGrowOpen(true); if (tries-- > 0) setTimeout(go, 100); return; }
       h.tabIndex = -1;
       h.scrollIntoView({ block: "start" });
       h.focus({ preventScroll: true });
@@ -89,11 +91,16 @@ export default function Admin() {
   }
 
   return (
-    <Layout title={shopName} right={owner.registered ? <Button variant="ghost" size="sm" onClick={logout} data-testid="button-logout">{t("logout")}</Button> : undefined}>
-      <div className="mb-6">
-        <VoicePanel onRegister={() => navigate("/signup")} onShareLink={() => { shareRef.current?.scrollIntoView({ block: "center" }); shareRef.current?.focus(); }} onChanged={() => { queryClient.invalidateQueries({ queryKey: [`/api/owner/reservations?lang=${lang}`] }); queryClient.invalidateQueries({ queryKey: [`/api/owner/menus?lang=${lang}`] }); queryClient.invalidateQueries({ queryKey: [`/api/owner/summary?lang=${lang}`] }); queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] }); queryClient.invalidateQueries({ queryKey: ["/api/owner/memories"] }); ["/api/owner/staff", "/api/owner/payroll", `/api/owner/expenses?lang=${lang}`, `/api/owner/tickets?lang=${lang}`, `/api/owner/attendance?lang=${lang}`].forEach((k) => queryClient.invalidateQueries({ queryKey: [k] })); }} />
+    // 店名がまだなければ、ヘッダーのアプリ名と同じ見出しを二度出さない
+    <Layout title={shopName === t("appName") ? undefined : shopName}>
+      {shopName === t("appName") && <h1 className="sr-only">{t("adminTitle")}</h1>}
+      <div>
+        <VoicePanel onRegister={() => navigate("/signup")} onShareLink={() => { setMoreOpen(true); setTimeout(() => { shareRef.current?.scrollIntoView({ block: "center" }); shareRef.current?.focus(); }, 0); }} onChanged={() => { queryClient.invalidateQueries({ queryKey: [`/api/owner/reservations?lang=${lang}`] }); queryClient.invalidateQueries({ queryKey: [`/api/owner/menus?lang=${lang}`] }); queryClient.invalidateQueries({ queryKey: [`/api/owner/summary?lang=${lang}`] }); queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] }); queryClient.invalidateQueries({ queryKey: ["/api/owner/memories"] }); ["/api/owner/staff", "/api/owner/payroll", `/api/owner/expenses?lang=${lang}`, `/api/owner/tickets?lang=${lang}`, `/api/owner/attendance?lang=${lang}`].forEach((k) => queryClient.invalidateQueries({ queryKey: [k] })); }} />
       </div>
 
+      <details className="mt-4 rounded-xl border-2 bg-card p-4" open={moreOpen} onToggle={(e) => setMoreOpen(e.currentTarget.open)} data-testid="details-more">
+      <summary className="cursor-pointer text-lg font-bold">{t("moreTitle")}</summary>
+      <div className="mt-4">
       {/* 登録前は、この端末だけに保存されていることと、登録の入口を出す（ログアウトは出さない。出ると戻れなくなる） */}
       {!owner.registered && (
         <Card className="mb-6 border-primary" data-testid="card-register">
@@ -177,7 +184,7 @@ export default function Admin() {
         {hasCoupons && <div className="contents" data-section="coupons"><CouponCard /></div>}
       </div>
 
-      <details className="mt-6 rounded-xl border-2 bg-card p-4" open={growOpen} onToggle={(e) => setGrowOpen((e.target as HTMLDetailsElement).open)}>
+      <details className="mt-6 rounded-xl border-2 bg-card p-4" open={growOpen} onToggle={(e) => setGrowOpen(e.currentTarget.open)}>
         <summary className="cursor-pointer text-lg font-bold">{t("growTitle")}</summary>
         <p className="mt-2 text-sm text-muted-foreground">{t("growHint")}</p>
         <div className="mt-4 grid gap-5 sm:grid-cols-2">
@@ -212,6 +219,9 @@ export default function Admin() {
           </Card>
         )}
         </div>
+      </details>
+      {owner.registered && <p className="mt-4"><Button variant="outline" onClick={logout} data-testid="button-logout">{t("logout")}</Button></p>}
+      </div>
       </details>
     </Layout>
   );
