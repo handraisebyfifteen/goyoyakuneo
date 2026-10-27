@@ -179,15 +179,29 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
   const listenForMessage = useCallback(async () => {
     const id = ++runId.current;
     setPhase("listening");
+    setError("");
     try {
       const heard = await listen(speechLang, 10000);
       if (runId.current !== id) return;
       if (heard) await sendMessage(heard);
       else setPhase("idle");
-    } catch {
+    } catch (e) {
+      if (runId.current !== id) return;
+      // 黙って待機に戻ると「押しても何も起きない」に見える。聞き取れなかった理由を伝える
+      const code = e instanceof Error ? e.message : "";
+      const msg = code === "not-allowed" || code === "service-not-allowed" ? t("micDenied")
+        : code === "audio-capture" ? t("micNoDevice")
+        : code === "network" ? t("micNetwork")
+        : code === "aborted" ? ""
+        : t("micNoSpeech");
+      setPhase("idle");
+      if (!msg) return;
+      setError(msg);
+      flashSignal("ng");
+      await say(msg);
       if (runId.current === id) setPhase("idle");
     }
-  }, [sendMessage, speechLang]);
+  }, [say, sendMessage, speechLang, t]);
 
   const listenForYesNo = useCallback(async (attempt: number) => {
     const id = ++runId.current;

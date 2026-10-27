@@ -165,24 +165,26 @@
     --lt-speak-1: 158 58% 56%;  --lt-speak-2: 158 68% 25%;  --lt-speak-g: 158 62% 48%;
     --lt-confirm-1: 36 100% 64%; --lt-confirm-2: 30 90% 36%; --lt-confirm-g: 34 100% 54%;
     --lt-think-1: 256 70% 76%;  --lt-think-2: 256 50% 42%;  --lt-think-g: 256 70% 66%;
-    --lt-wash: .32;
+    --lt-wash: .4;
   }
-  .dark, [data-theme="dark"] { --lt-wash: .5; }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --lt-wash: .5; } }
+  .dark, [data-theme="dark"] { --lt-wash: .6; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --lt-wash: .6; } }
 }
 .lantern-stage { position: relative; isolation: isolate; }
 /* 光は画面の幅いっぱいに広げる。はみ出した分で横スクロールが出ないよう、ページの横方向は切る */
 html, body { overflow-x: clip; }
-/* 球の光が画面に広がる。本文の後ろに敷く */
+/* 球の光が画面に広がる。画面全体（スクロールしても）に敷き、本文の後ろに置く */
 .lantern-wash {
-  position: absolute; inset: -40% -30%; z-index: -1; pointer-events: none;
-  background: radial-gradient(ellipse at 50% 38%, hsl(var(--lt-g) / calc(var(--lt-wash) * var(--lt-b, 1))), transparent 55%);
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: radial-gradient(ellipse 90vmax 70vmax at 50% 28%, hsl(var(--lt-g) / calc(var(--lt-wash) * var(--lt-b, 1))), hsl(var(--lt-g) / calc(var(--lt-wash) * var(--lt-b, 1) * .35)) 45%, transparent 85%);
   transition: background .6s ease;
 }
+/* 待機の色。ボタンだけでなく、後ろの光（.lantern-wash）にも要る */
+.lantern-stage, .lantern { --lt-1: var(--lt-idle-1); --lt-2: var(--lt-idle-2); --lt-g: var(--lt-idle-g); }
 .lantern {
-  --lt-1: var(--lt-idle-1); --lt-2: var(--lt-idle-2); --lt-g: var(--lt-idle-g);
   position: relative; border-radius: 9999px; border: 0; color: hsl(var(--lt-2)); cursor: pointer;
-  background: radial-gradient(circle at 50% 40%, #fff 0, hsl(var(--lt-1) / .55) 18%, hsl(var(--lt-1)) 45%, hsl(var(--lt-2)) 100%);
+  /* 白い照りは左上に小さく置く。真ん中に置くとマイクのアイコン（白）が溶ける */
+  background: radial-gradient(circle at 30% 24%, hsl(0 0% 100% / .85) 0, hsl(var(--lt-1) / .9) 14%, hsl(var(--lt-1)) 38%, hsl(var(--lt-2)) 100%);
   box-shadow:
     0 0 0 6px hsl(var(--lt-g) / calc(.18 * var(--lt-b, 1))),
     0 0 40px 8px hsl(var(--lt-g) / calc(.55 * var(--lt-b, 1))),
@@ -190,13 +192,14 @@ html, body { overflow-x: clip; }
   transition: background .5s ease, box-shadow .5s ease, transform .2s ease;
 }
 .lantern:active { transform: scale(.97); }
+.lantern > svg { filter: drop-shadow(0 1px 3px hsl(var(--lt-2) / .8)); }
 .lantern:disabled { cursor: default; filter: grayscale(.7); opacity: .6; }
 .lantern[aria-disabled="true"] { cursor: progress; }
 .lantern-stage[data-s="listen"], .lantern[data-s="listen"] { --lt-1: var(--lt-listen-1); --lt-2: var(--lt-listen-2); --lt-g: var(--lt-listen-g); }
 .lantern-stage[data-s="speak"], .lantern[data-s="speak"] { --lt-1: var(--lt-speak-1); --lt-2: var(--lt-speak-2); --lt-g: var(--lt-speak-g); }
 .lantern-stage[data-s="confirm"], .lantern[data-s="confirm"] { --lt-1: var(--lt-confirm-1); --lt-2: var(--lt-confirm-2); --lt-g: var(--lt-confirm-g); }
 .lantern-stage[data-s="think"], .lantern[data-s="think"] { --lt-1: var(--lt-think-1); --lt-2: var(--lt-think-2); --lt-g: var(--lt-think-g); }
-.lantern-stage[data-s="idle"] .lantern-wash { opacity: .7; }
+.lantern-stage[data-s="idle"] .lantern-wash { opacity: .75; }
 .dark .lantern, [data-theme="dark"] .lantern { color: #fff; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .lantern { color: #fff; } }
 /* 動き：聞き取り中は速く、話し中はゆっくり明滅。考え中は環が回る。点滅は1秒に3回まで */
