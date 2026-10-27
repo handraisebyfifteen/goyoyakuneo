@@ -68,8 +68,8 @@ function questionFor(item: SetupItem, owner: Owner, lang: Language): string {
       ? `営業時間はいつも何時から何時までですか？お休みの曜日も教えてください。今は仮に${hoursText(owner, lang)}にしてあります。`
       : `What are your usual opening hours, and which days are you closed? For now I have set ${hoursText(owner, lang)}.`;
     case "account": return ja
-      ? "お店の記録は、今はこの端末にだけ結びついています。端末を替えたり、ブラウザの記録を消したりすると、元に戻せません。お客さんに予約ページを渡したり、確認のメールを送ったりできるのも、登録してからです。店名とメール、ログインの方法を登録しておきませんか？"
-      : "Right now your shop's records are tied to this device only. If you change devices or clear the browser's data, they cannot be recovered. Sharing the booking page with customers and sending confirmation emails also start once you register. Shall we register your shop name, email and how you log in?";
+      ? "お店の記録は、今はこの端末にだけ結びついています。端末を替えたり、ブラウザの記録を消したりすると、元に戻せません。iPhone や iPad では、1週間ほど開かないと消えることがあり、ホーム画面に追加したアプリと Safari は別の端末として扱われます。お客さんに予約ページを渡したり、確認のメールを送ったりできるのも、登録してからです。店名とメール、ログインの方法を登録しておきませんか？"
+      : "Right now your shop's records are tied to this device only. If you change devices or clear the browser's data, they cannot be recovered. On iPhone and iPad, they can also be lost if you don't open the app for about a week, and an app added to the Home Screen counts as a different device from Safari. Sharing the booking page with customers and sending confirmation emails also start once you register. Shall we register your shop name, email and how you log in?";
     case "menu": return ja
       ? "お客さんがネットからも予約できるように、メニューを一つ教えてもらえますか？たとえば「60分6000円」のように。"
       : 'So customers can also book online, could you tell me one of your services? For example, "60 minutes, 6000 yen".';

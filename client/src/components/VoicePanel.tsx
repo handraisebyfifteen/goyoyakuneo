@@ -5,6 +5,8 @@
  * - 連続モード：読み上げが終わったら自動で聞き取りを再開する
  * - 合言葉を聞くときは、画面にも履歴にも出さない（サーバーへ直接送る）
  * - 日常モデルと相談モデルで声の高さを変える
+ * - スクリーンリーダーに任せているとき（スマホ、または「アプリの読み上げを止める」設定）は、こちらから聞き取りを始めない。
+ *   読み上げの声をマイクが拾い、合言葉の間違いや勝手な返事になるため。答えははい/いいえのボタンや入力欄にフォーカスを移して受ける
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -14,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n } from "@/lib/i18n";
 import { apiRequest, ApiRequestError } from "@/lib/queryClient";
-import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, unlockSpeech, SpeechNotAllowed, isTouchDevice } from "@/lib/speech";
+import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, unlockSpeech, SpeechNotAllowed, isTouchDevice, getVoicePrefs } from "@/lib/speech";
 import { flashSignal, setSignal, type SignalState } from "@/lib/signal";
 import { SignalSettings } from "@/components/SignalSettings";
 
@@ -35,8 +37,9 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
   const { t, lang, speechLang } = useI18n();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
-  // スマホは返事を VoiceOver が読むので、読み終わりを待たずに聞き始めないよう、連続モードは最初は切っておく
-  const [continuous, setContinuous] = useState(() => !isTouchDevice());
+  // スクリーンリーダーに任せている状態。連続モードは最初は切っておく（読み終わりを待たずに聞き始めないため）
+  const srMode = isTouchDevice() || getVoicePrefs().mute;
+  const [continuous, setContinuous] = useState(() => !srMode);
   const [typed, setTyped] = useState("");
   const [error, setError] = useState("");
   const [needsGesture, setNeedsGesture] = useState(false);
@@ -46,9 +49,12 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
   const nextId = useRef(1);
   const announced = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const yesRef = useRef<HTMLButtonElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [cameraFor, setCameraFor] = useState<{ reservationId: number; customerName: string } | null>(null);
   continuousRef.current = continuous;
+  // 確認と合言葉で、こちらから聞き取りを始めてよいか。スクリーンリーダーに任せているときは、連続モードを自分で入れた人だけ
+  const canAutoListen = () => sttSupported() && (!srMode || continuousRef.current);
 
   const status = useQuery<{ aiConfigured: boolean; hasPassphrase: boolean }>({ queryKey: ["/api/voice/status"] });
   const history = useQuery<{ messages: { id: number; role: string; content: string; model: Model }[] }>({ queryKey: ["/api/voice/history"], staleTime: Infinity });
@@ -112,7 +118,7 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
       await say(reply.text, "daily");
       if (!alive()) return;
       setPhase("confirm");
-      if (sttSupported()) void listenForYesNo(0);
+      if (canAutoListen()) void listenForYesNo(0);
       return;
     }
     // 合言葉：質問は表示するが、答えは表示も記録もしない
@@ -121,8 +127,7 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
     await say(reply.text, "daily");
     if (!alive()) return;
     setPhase("passphrase");
-    if (sttSupported()) void listenForPassphrase();
-    else inputRef.current?.focus();
+    if (canAutoListen()) void listenForPassphrase();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [push, say, onChanged, onRegister]);
 
@@ -314,6 +319,15 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
 
   useEffect(() => () => { runId.current++; stopSpeaking(); stopListening(); setSignal("idle"); }, []);
 
+  // 聞き取りを始めずに答えを待つときは、答える部品へフォーカスを移す（はい/いいえ、合言葉の入力欄）。
+  // 質問の読み上げが途中で切れても、部品の説明（aria-describedby）として聞き直せる
+  useEffect(() => {
+    if (canAutoListen()) return;
+    if (phase === "confirm") yesRef.current?.focus();
+    else if (phase === "passphrase") inputRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
+
   // 少し見える人への合図（画面のふちの光と振動）。はい/いいえを聞いている間は「確認待ち」として知らせる
   useEffect(() => {
     const stage = pendingRef.current?.stage;
@@ -354,16 +368,18 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
         <button
           type="button"
           onClick={onMic}
-          disabled={busy || !!aiOff}
+          disabled={!!aiOff}
+          aria-disabled={busy || undefined}
           aria-pressed={phase === "listening"}
           aria-label={phase === "listening" ? t("micStop") : t("micStart")}
           data-testid="button-mic"
           className={`h-40 w-40 sm:h-48 sm:w-48 rounded-full border-4 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring
-            ${phase === "listening" ? "bg-destructive text-destructive-foreground border-destructive animate-pulse" : phase === "speaking" ? "bg-accent text-accent-foreground border-accent" : "bg-primary text-primary-foreground border-primary hover:bg-primary/90"} disabled:opacity-50`}
+            ${phase === "listening" ? "bg-destructive text-destructive-foreground border-destructive animate-pulse" : phase === "speaking" ? "bg-accent text-accent-foreground border-accent" : "bg-primary text-primary-foreground border-primary hover:bg-primary/90"} ${busy ? "opacity-50" : ""} disabled:opacity-50`}
         >
           {busy ? <Loader2 className="h-16 w-16 animate-spin" aria-hidden /> : phase === "listening" ? <Square className="h-16 w-16" aria-hidden /> : phase === "speaking" ? <Volume2 className="h-16 w-16" aria-hidden /> : <Mic className="h-20 w-20" aria-hidden />}
         </button>
-        <p className="text-lg font-semibold" role="status" data-testid="text-phase">{phaseLabel}</p>
+        {/* 状態はスクリーンリーダーに読ませない（聞き取り中に読まれると、その声をマイクが拾う）。マイクボタンの aria-pressed で足りる */}
+        <p className="text-lg font-semibold" aria-hidden="true" data-testid="text-phase">{phaseLabel}</p>
         {needsGesture && <p className="text-sm" role="status">{t("pressAnyKey")}</p>}
         {!sttSupported() && <p className="text-sm text-muted-foreground">{t("noSpeech")}</p>}
       </div>
@@ -378,21 +394,21 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
 
       {phase === "confirm" && (
         <div className="flex justify-center gap-4" role="group" aria-label={t("waitingYesNo")}>
-          <Button size="lg" onClick={() => { runId.current++; stopListening(); void sendConfirm("yes"); }} data-testid="button-confirm-yes">{t("yes")}</Button>
-          <Button size="lg" variant="outline" onClick={() => { runId.current++; stopListening(); void sendConfirm("no"); }} data-testid="button-confirm-no">{t("no")}</Button>
+          <Button ref={yesRef} size="lg" aria-describedby="voice-last" onClick={() => { runId.current++; stopListening(); void sendConfirm("yes"); }} data-testid="button-confirm-yes">{t("yes")}</Button>
+          <Button size="lg" variant="outline" aria-describedby="voice-last" onClick={() => { runId.current++; stopListening(); void sendConfirm("no"); }} data-testid="button-confirm-no">{t("no")}</Button>
         </div>
       )}
 
       <div className="text-left rounded-lg border-2 p-4 min-h-24" aria-live="polite" aria-atomic="true" data-testid="text-assistant-live">
         <p className="text-sm text-muted-foreground mb-1">{lastAssistant?.model === "consult" ? t("advisorLabel") : t("assistantLabel")}</p>
-        <p className="text-xl font-semibold whitespace-pre-wrap">{lastAssistant?.text ?? t("voiceEmpty")}</p>
+        <p id="voice-last" className="text-xl font-semibold whitespace-pre-wrap">{lastAssistant?.text ?? t("voiceEmpty")}</p>
         {error && <p className="mt-2 text-destructive font-semibold" role="alert">{error}</p>}
       </div>
 
       <form onSubmit={submitTyped} className="flex flex-col sm:flex-row gap-3 text-left">
         <div className="flex-1">
           <Label htmlFor="voice-typed">{phase === "passphrase" ? t("passphraseTyped") : t("typeHere")}</Label>
-          <Input id="voice-typed" ref={inputRef} type={phase === "passphrase" ? "password" : "text"} autoComplete="off" value={typed}
+          <Input id="voice-typed" ref={inputRef} type={phase === "passphrase" ? "password" : "text"} aria-describedby={phase === "passphrase" ? "voice-last" : undefined} autoComplete="off" value={typed}
             onChange={(e) => setTyped(e.target.value)} disabled={busy || !!aiOff} data-testid="input-voice-text" />
         </div>
         <Button type="submit" size="lg" className="sm:self-end" disabled={busy || !!aiOff} data-testid="button-voice-send">{t("send")}</Button>

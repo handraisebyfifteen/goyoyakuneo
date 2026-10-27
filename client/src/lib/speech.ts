@@ -159,32 +159,59 @@ export async function speak(text: string, lang: string, opts: SpeakOptions = {})
   if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); await new Promise((r) => setTimeout(r, 80)); }
   if (speechSynthesis.paused) speechSynthesis.resume();
   const voices = await loadVoices();
+  const key = voiceLangOf(lang);
+  // 英語で声を低くすると威圧的に聞こえるので、高さの変化を半分にする
+  const pitch = opts.pitch ?? 1;
+  const p = key === "en" ? 1 + (pitch - 1) / 2 : pitch;
+  const rate = opts.rate ?? RATE[prefs[key].rate] * (key === "en" ? 0.95 : 1);
+  let v = pickVoice(voices, lang);
+  // 前に固まった声は、この画面を開いている間は使わない
+  if (v && stalledVoices.has(v.voiceURI)) v = localVoice(voices, lang) ?? v;
+  // Chrome のネット経由の声（Google 日本語など）は、speaking=true のまま音が出ずに固まることがある。
+  // 始まらなければ端末に入っている声で読み直す
+  const fallback = v && !v.localService ? localVoice(voices, lang) : undefined;
+  const result = await utter(text, lang, v, rate, p, fallback ? STALL_MS : null);
+  if (result === "stalled" && v && fallback) {
+    stalledVoices.add(v.voiceURI);
+    speechSynthesis.cancel();
+    await new Promise((r) => setTimeout(r, 80));
+    await utter(text, lang, fallback, rate, p, null);
+  }
+}
+
+const STALL_MS = 2500;
+const stalledVoices = new Set<string>();
+
+/** 端末に入っている（ネットを使わない）声のうち、設定にいちばん合うもの */
+function localVoice(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice | undefined {
+  return voicesFor(voices, lang).find((x) => x.localService);
+}
+
+/** 一つの声で読み上げる。stallMs までに始まらなければ "stalled" で戻る（null なら待ち続ける） */
+function utter(text: string, lang: string, v: SpeechSynthesisVoice | undefined, rate: number, pitch: number, stallMs: number | null): Promise<"done" | "stalled"> {
   return new Promise((resolve, reject) => {
     const u = new SpeechSynthesisUtterance(text);
     currentUtterance = u;
-    const key = voiceLangOf(lang);
-    const v = pickVoice(voices, lang);
     // 声が見つかればその声の言語に合わせる（ja-JP の文を en-GB の声で読まない）
     u.lang = v ? v.lang : lang;
     if (v) u.voice = v;
-    // 英語で声を低くすると威圧的に聞こえるので、高さの変化を半分にする
-    const pitch = opts.pitch ?? 1;
-    u.pitch = key === "en" ? 1 + (pitch - 1) / 2 : pitch;
-    u.rate = opts.rate ?? RATE[prefs[key].rate] * (key === "en" ? 0.95 : 1);
+    u.pitch = pitch;
+    u.rate = rate;
     let settled = false;
-    const done = () => { if (!settled) { settled = true; if (currentUtterance === u) currentUtterance = null; resolve(); } };
-    u.onend = done;
+    let started = false;
+    const finish = (r: "done" | "stalled") => { if (!settled) { settled = true; if (currentUtterance === u) currentUtterance = null; resolve(r); } };
+    u.onstart = () => { started = true; };
+    u.onend = () => finish("done");
     u.onerror = (e) => {
       if (settled) return;
-      settled = true;
-      if (currentUtterance === u) currentUtterance = null;
-      if (e.error === "not-allowed") reject(new SpeechNotAllowed("not-allowed"));
-      else if (e.error === "interrupted" || e.error === "canceled") resolve();
-      else { lastError = e.error; resolve(); }
+      if (e.error === "not-allowed") { settled = true; if (currentUtterance === u) currentUtterance = null; reject(new SpeechNotAllowed("not-allowed")); return; }
+      if (e.error !== "interrupted" && e.error !== "canceled") lastError = e.error;
+      finish("done");
     };
     speechSynthesis.speak(u);
+    if (stallMs !== null) setTimeout(() => { if (!started) finish("stalled"); }, stallMs);
     // 一部のブラウザは onend を落とすので、長さに応じた保険
-    setTimeout(done, 2000 + text.length * 180);
+    setTimeout(() => finish("done"), 2000 + text.length * 180);
   });
 }
 

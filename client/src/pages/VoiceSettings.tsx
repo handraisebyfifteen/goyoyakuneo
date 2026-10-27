@@ -1,16 +1,18 @@
 /**
  * 声の設定。初めて開いた人はここから始まる（ようこそ画面より先）。
+ * 初回はまず「スクリーンリーダーをお使いですか」をボタンで聞く。使う人にはアプリの読み上げを止めて、声の設定は飛ばす（ScreenReaderQuestion）。
  * 上：会話で設定する。女性/男性の声を実際に聞かせてから選んでもらい、次に速さを選ぶ。
  * 下：詳しい設定。日本語・英語それぞれで具体的な声や速さを選ぶ、読み上げを止める。
  * 声は端末に入っているものなので、設定も端末（localStorage）に保存する。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { VoiceConversation, type Step, type IntroPart } from "@/components/VoiceConversation";
 import { useI18n } from "@/lib/i18n";
+import { useAnnounce } from "@/hooks/useAnnounce";
 import { getVoicePrefs, setVoicePrefs, loadVoices, voicesFor, guessGender, previewVoice, speak, ttsSupported, voiceConversationUsable, type VoiceLang, type VoicePref, type VoicePrefs, type Gender, type Rate } from "@/lib/speech";
 
 const selectClass = "flex min-h-12 w-full rounded-md border-2 border-input bg-card px-3 py-2 text-base";
@@ -23,6 +25,8 @@ export default function VoiceSettings() {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [savedMsg, setSavedMsg] = useState("");
   const [mode, setMode] = useState<"voice" | "form">(() => (voiceConversationUsable() ? "voice" : "form"));
+  // 初回の最初の質問に答えたか（初回でなければ聞かない）
+  const [srAnswered, setSrAnswered] = useState(!firstRun);
   const current: VoiceLang = lang;
 
   useEffect(() => {
@@ -80,6 +84,13 @@ export default function VoiceSettings() {
     navigate("/", { replace: true });
   }
 
+  // スクリーンリーダーを使う人は、アプリの読み上げを止めて、はじめの画面へ（アプリが声を出さないので、声の設定は要らない）
+  function answerScreenReader(usesScreenReader: boolean) {
+    if (!usesScreenReader) { setSrAnswered(true); return; }
+    setVoicePrefs({ ...getVoicePrefs(), mute: true });
+    navigate("/", { replace: true });
+  }
+
   return (
     <Layout title={t("voiceSettings")}>
       <div className="space-y-8">
@@ -87,7 +98,9 @@ export default function VoiceSettings() {
 
         <section aria-labelledby="voice-by-voice" className="space-y-4">
           <h2 id="voice-by-voice" className="text-xl font-bold">{t("byVoice")}</h2>
-          <VoiceConversation steps={steps} intro={intro} mode={mode} onModeChange={setMode} onComplete={complete} submitLabel={t("save")} />
+          {firstRun && !srAnswered
+            ? <ScreenReaderQuestion onAnswer={answerScreenReader} />
+            : <VoiceConversation steps={steps} intro={intro} mode={mode} onModeChange={setMode} onComplete={complete} submitLabel={t("save")} />}
           {firstRun && <p><Button variant="link" onClick={later} data-testid="button-later">{t("later")}</Button></p>}
           {!firstRun && <p><Button variant="link" asChild><Link href="/">{t("back")}</Link></Button></p>}
         </section>
@@ -164,6 +177,29 @@ function LangSection({ lang, pref, voices, onChange }: { lang: VoiceLang; pref: 
       </div>
 
       <Button size="lg" onClick={preview} disabled={playing || !list.length} data-testid={`button-preview-${lang}`}>{playing ? t("speaking") : t("preview")}</Button>
+    </section>
+  );
+}
+
+/**
+ * 初回の最初の質問。スクリーンリーダーを使う人には、以後アプリは自分の声を出さない（声が重なり、読み上げをマイクが拾うため）。
+ * この質問だけはボタンで答えてもらう。ここで聞き取りを始めると、スクリーンリーダーの読み上げを答えとして拾うことがある。
+ * フォーカスは質問の見出しに置く（ボタンに置くと Enter で答えが決まってしまう）
+ */
+function ScreenReaderQuestion({ onAnswer }: { onAnswer: (usesScreenReader: boolean) => void }) {
+  const { t, speechLang } = useI18n();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const needsGesture = useAnnounce(t("askScreenReaderSpeech"), speechLang);
+  useEffect(() => { headingRef.current?.focus(); }, []);
+  return (
+    <section aria-labelledby="sr-question" className="rounded-xl border-2 bg-card p-5 space-y-4" data-testid="sr-question">
+      <h3 id="sr-question" ref={headingRef} tabIndex={-1} className="text-xl font-bold outline-none">{t("askScreenReader")}</h3>
+      <p className="text-muted-foreground">{t("askScreenReaderNote")}</p>
+      {needsGesture && <p role="status" className="text-sm">{t("pressAnyKey")}</p>}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <Button size="lg" onClick={() => onAnswer(true)} data-testid="button-sr-yes">{t("srYes")}</Button>
+        <Button size="lg" variant="outline" onClick={() => onAnswer(false)} data-testid="button-sr-no">{t("srNo")}</Button>
+      </div>
     </section>
   );
 }
