@@ -19,6 +19,7 @@ import { apiRequest, ApiRequestError } from "@/lib/queryClient";
 import { listen, speak, stopListening, stopSpeaking, sttSupported, ttsSupported, yesNo, unlockSpeech, SpeechNotAllowed, isTouchDevice, getVoicePrefs } from "@/lib/speech";
 import { flashSignal, setSignal, type SignalState } from "@/lib/signal";
 import { SignalSettings } from "@/components/SignalSettings";
+import { useSignal } from "@/lib/signal";
 
 type Model = "daily" | "consult";
 type Msg = { id: number; role: "user" | "assistant"; text: string; model?: Model; kind?: "confirm" | "passphrase" };
@@ -57,6 +58,8 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
   const canAutoListen = () => sttSupported() && (!srMode || continuousRef.current);
 
   const status = useQuery<{ aiConfigured: boolean; hasPassphrase: boolean }>({ queryKey: ["/api/voice/status"] });
+  // ボタンの光の明るさと「動きを減らす」は、ふちの光と同じ設定
+  const { prefs: sigPrefs } = useSignal();
   const history = useQuery<{ messages: { id: number; role: string; content: string; model: Model }[] }>({ queryKey: ["/api/voice/history"], staleTime: Infinity });
   useEffect(() => {
     if (history.data && messages.length === 0) {
@@ -357,6 +360,7 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
   const phaseLabel = phase === "listening" ? t("listening") : phase === "thinking" ? t("thinking") : phase === "speaking" ? t("speaking")
     : phase === "confirm" ? t("waitingYesNo") : phase === "passphrase" ? t("passphraseListening") : phase === "camera" ? t("cameraHint") : phase === "reading" ? t("cameraReading") : t("micHint");
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  const lanternState = phase === "listening" || phase === "passphrase" ? "listen" : busy ? "think" : phase === "speaking" ? "speak" : phase === "confirm" ? "confirm" : "idle";
   const showTypedOpen = phase === "passphrase" || !sttSupported() || !!aiOff;
   const typedForm = (
     <form onSubmit={submitTyped} className="flex flex-col sm:flex-row gap-3 text-left">
@@ -370,8 +374,9 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
   );
 
   return (
-    <section aria-labelledby="voice-heading" className="py-6 sm:py-10 text-center space-y-6" data-testid="voice-panel">
+    <section aria-labelledby="voice-heading" className={`lantern-stage py-6 sm:py-10 text-center space-y-6${sigPrefs.calm ? " lantern-calm" : ""}`} data-s={lanternState} style={{ "--lt-b": sigPrefs.bright / 100 } as React.CSSProperties} data-testid="voice-panel">
       <h2 id="voice-heading" className="sr-only">{t("voiceTitle")}</h2>
+      <div className="lantern-wash" aria-hidden />
 
       {aiOff ? <p role="alert" className="text-destructive font-semibold">{t("aiNotConfigured")}</p> : null}
 
@@ -384,13 +389,13 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
           aria-pressed={phase === "listening"}
           aria-label={phase === "listening" ? t("micStop") : t("micStart")}
           data-testid="button-mic"
-          className={`h-40 w-40 sm:h-48 sm:w-48 rounded-full border-4 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring
-            ${phase === "listening" ? "bg-destructive text-destructive-foreground border-destructive animate-pulse" : phase === "speaking" ? "bg-accent text-accent-foreground border-accent" : "bg-primary text-primary-foreground border-primary hover:bg-primary/90"} ${busy ? "opacity-50" : ""} disabled:opacity-50`}
+          data-s={lanternState}
+          className="lantern h-40 w-40 sm:h-48 sm:w-48 flex items-center justify-center focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring focus-visible:ring-offset-4 focus-visible:ring-offset-background"
         >
           {busy ? <Loader2 className="h-16 w-16 animate-spin" aria-hidden /> : phase === "listening" ? <Square className="h-16 w-16" aria-hidden /> : phase === "speaking" ? <Volume2 className="h-16 w-16" aria-hidden /> : <Mic className="h-20 w-20" aria-hidden />}
         </button>
         {/* 状態はスクリーンリーダーに読ませない（聞き取り中に読まれると、その声をマイクが拾う）。マイクボタンの aria-pressed で足りる */}
-        <p className="text-lg font-semibold" aria-hidden="true" data-testid="text-phase">{phaseLabel}</p>
+        <p className="text-base font-medium text-muted-foreground" aria-hidden="true" data-testid="text-phase">{phaseLabel}</p>
         {needsGesture && <p className="text-sm" role="status">{t("pressAnyKey")}</p>}
         {!sttSupported() && <p className="text-sm text-muted-foreground">{t("noSpeech")}</p>}
       </div>

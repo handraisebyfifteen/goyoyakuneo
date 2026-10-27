@@ -154,3 +154,64 @@
 @keyframes sig-once    { 0% { opacity: 0; } 15% { opacity: 1; } 100% { opacity: 0; } }
 @keyframes sig-swell   { 0% { --sig-k: 1; } 25% { --sig-k: 2.4; } 100% { --sig-k: 1.2; } }
 @keyframes sig-twice   { 0% { opacity: 0; } 15% { opacity: 1; } 35% { opacity: .1; } 55% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ランタン：マイクボタンそのものが光源になり、光が画面に広がる（VoicePanel）。
+   状態は data-s で切り替え、色は球の明暗 --lt-1 --lt-2 と光 --lt-g。
+   明るさ --lt-b と「動きを減らす」は、ふちの光と同じ設定（lib/signal.ts）を使う */
+@layer base {
+  :root {
+    --lt-idle-1: 216 70% 62%;   --lt-idle-2: 218 66% 32%;   --lt-idle-g: 216 68% 54%;
+    --lt-listen-1: 8 100% 74%;  --lt-listen-2: 3 66% 44%;   --lt-listen-g: 6 100% 64%;
+    --lt-speak-1: 158 58% 56%;  --lt-speak-2: 158 68% 25%;  --lt-speak-g: 158 62% 48%;
+    --lt-confirm-1: 36 100% 64%; --lt-confirm-2: 30 90% 36%; --lt-confirm-g: 34 100% 54%;
+    --lt-think-1: 256 70% 76%;  --lt-think-2: 256 50% 42%;  --lt-think-g: 256 70% 66%;
+    --lt-wash: .32;
+  }
+  .dark, [data-theme="dark"] { --lt-wash: .5; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --lt-wash: .5; } }
+}
+.lantern-stage { position: relative; isolation: isolate; }
+/* 光は画面の幅いっぱいに広げる。はみ出した分で横スクロールが出ないよう、ページの横方向は切る */
+html, body { overflow-x: clip; }
+/* 球の光が画面に広がる。本文の後ろに敷く */
+.lantern-wash {
+  position: absolute; inset: -40% -30%; z-index: -1; pointer-events: none;
+  background: radial-gradient(ellipse at 50% 38%, hsl(var(--lt-g) / calc(var(--lt-wash) * var(--lt-b, 1))), transparent 55%);
+  transition: background .6s ease;
+}
+.lantern {
+  --lt-1: var(--lt-idle-1); --lt-2: var(--lt-idle-2); --lt-g: var(--lt-idle-g);
+  position: relative; border-radius: 9999px; border: 0; color: hsl(var(--lt-2)); cursor: pointer;
+  background: radial-gradient(circle at 50% 40%, #fff 0, hsl(var(--lt-1) / .55) 18%, hsl(var(--lt-1)) 45%, hsl(var(--lt-2)) 100%);
+  box-shadow:
+    0 0 0 6px hsl(var(--lt-g) / calc(.18 * var(--lt-b, 1))),
+    0 0 40px 8px hsl(var(--lt-g) / calc(.55 * var(--lt-b, 1))),
+    0 0 90px 20px hsl(var(--lt-g) / calc(.3 * var(--lt-b, 1)));
+  transition: background .5s ease, box-shadow .5s ease, transform .2s ease;
+}
+.lantern:active { transform: scale(.97); }
+.lantern:disabled { cursor: default; filter: grayscale(.7); opacity: .6; }
+.lantern[aria-disabled="true"] { cursor: progress; }
+.lantern-stage[data-s="listen"], .lantern[data-s="listen"] { --lt-1: var(--lt-listen-1); --lt-2: var(--lt-listen-2); --lt-g: var(--lt-listen-g); }
+.lantern-stage[data-s="speak"], .lantern[data-s="speak"] { --lt-1: var(--lt-speak-1); --lt-2: var(--lt-speak-2); --lt-g: var(--lt-speak-g); }
+.lantern-stage[data-s="confirm"], .lantern[data-s="confirm"] { --lt-1: var(--lt-confirm-1); --lt-2: var(--lt-confirm-2); --lt-g: var(--lt-confirm-g); }
+.lantern-stage[data-s="think"], .lantern[data-s="think"] { --lt-1: var(--lt-think-1); --lt-2: var(--lt-think-2); --lt-g: var(--lt-think-g); }
+.lantern-stage[data-s="idle"] .lantern-wash { opacity: .7; }
+.dark .lantern, [data-theme="dark"] .lantern { color: #fff; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .lantern { color: #fff; } }
+/* 動き：聞き取り中は速く、話し中はゆっくり明滅。考え中は環が回る。点滅は1秒に3回まで */
+.lantern[data-s="listen"] { animation: lt-glow 1.3s ease-in-out infinite; }
+.lantern[data-s="speak"] { animation: lt-glow 2.6s ease-in-out infinite; }
+.lantern[data-s="confirm"] { animation: lt-knock 1.8s linear infinite; }
+.lantern[data-s="think"]::after {
+  content: ""; position: absolute; inset: -10px; border-radius: 9999px; padding: 4px;
+  background: conic-gradient(from var(--sig-a), transparent 0deg 250deg, hsl(var(--lt-g)) 340deg, transparent 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  animation: sig-spin 1.6s linear infinite;
+}
+.lantern-calm .lantern, .lantern-calm .lantern::after { animation: none; }
+@media (prefers-reduced-motion: reduce) { .lantern, .lantern::after { animation: none !important; } }
+@keyframes lt-glow { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.18); } }
+@keyframes lt-knock { 0% { filter: brightness(.92); } 8% { filter: brightness(1.2); } 18% { filter: brightness(.92); } 28% { filter: brightness(1.2); } 38%, 100% { filter: brightness(.92); } }

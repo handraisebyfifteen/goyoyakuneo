@@ -62,7 +62,7 @@ const ja: Dict = {
   passphraseListening: "合言葉を聞いています。画面には表示されません。", passphraseHidden: "（合言葉。表示されません）", passphraseTyped: "合言葉（表示されません）",
   typeHere: "文字で話しかけることもできます", send: "送る", continuousMode: "連続モード（読み上げの後、自動で聞き取る）", spaceHint: "スペースキーでもマイクを押せます",
   transcript: "会話の記録", you: "あなた", assistantLabel: "ご予約ちゃん", advisorLabel: "ご予約ちゃん（相談）", voiceEmpty: "ここに返事が表示されます。",
-  signalTitle: "光と振動で知らせる（少し見える方向け）", signalLight: "画面のふちを光らせる", signalColor: "色", signalColorEach: "状態ごとに変える", signalColorMono: "1色だけ",
+  signalTitle: "光と振動の設定（少し見える方向け）", signalLight: "画面のふちを光らせる", signalColor: "色", signalColorEach: "状態ごとに変える", signalColorMono: "1色だけ",
   signalBright: "明るさ", signalThick: "光の太さ", signalCalm: "動きを減らす（光り方を一定にする）", signalVibrate: "振動で知らせる（Android のみ）",
   signalCalmWarn: "色も動きもないと、光だけでは状態の区別がつきません。振動で区別してください。", signalPreview: "試しに光らせる",
   aiNotConfigured: "AIの接続（NEBIUS_API_KEY）が設定されていないため、声の操作は使えません。",
@@ -201,6 +201,7 @@ const ja: Dict = {
   couponCodeLabel: "コード（例：SPRING10）", couponKind: "割引", couponAmount: "円引き", couponValue: "割引の大きさ", couponCreate: "クーポンを作る",
   canDoTitle: "今できること", canDoReady: "登録・設定してあるからできること", canDoReadyNone: "まだありません。お店を登録したり、メニューを決めたりすると、ここに増えていきます。",
   canDoNext: "設定するとできること", canDoAlways: "いつでも声でできること（{n}）", canDoSay: "言い方の例：「{say}」", canDoAuto: "自動で動きます", canDoScreen: "「開く」から画面で使います", canDoOpen: "開く", canDoOpenLabel: "{title}を開く",
+  themeTitle: "画面の明るさ", themeLight: "明るい", themeDark: "暗い", themeSystem: "端末に合わせる", glowBright: "光の明るさ（ボタンとふち）",
   moreTitle: "その他（予約・売り上げ・設定など）", voiceMore: "文字で入力する・会話の記録", startSimple: "はじめる",
   growTitle: "お店を広げる・設定", growHint: "スタッフ、回数券、メールでの声かけ、外部カレンダー、店舗グループ、APIキー、ご利用料金など。必要になったら開いてください。", thisShop: "（この店）", bookingsN: "{n}件", reservationsCol: "予約", noShows: "無断キャンセル",
 };
@@ -261,7 +262,7 @@ const en: Dict = {
   passphraseListening: "Listening for your passphrase. It will not be shown.", passphraseHidden: "(passphrase, not shown)", passphraseTyped: "Passphrase (not shown)",
   typeHere: "You can also type here", send: "Send", continuousMode: "Hands-free (listen again after each reply)", spaceHint: "The space bar also presses the microphone",
   transcript: "Conversation log", you: "You", assistantLabel: "GoYoyaku-chan", advisorLabel: "GoYoyaku-chan (advisor)", voiceEmpty: "Replies appear here.",
-  signalTitle: "Light and vibration cues (for low vision)", signalLight: "Glow around the screen edge", signalColor: "Colour", signalColorEach: "A colour for each state", signalColorMono: "One colour",
+  signalTitle: "Light and vibration (for low vision)", signalLight: "Glow around the screen edge", signalColor: "Colour", signalColorEach: "A colour for each state", signalColorMono: "One colour",
   signalBright: "Brightness", signalThick: "Glow width", signalCalm: "Reduce motion (steady glow)", signalVibrate: "Vibrate (Android only)",
   signalCalmWarn: "With no colour and no motion, the glow alone can't tell states apart. Use vibration instead.", signalPreview: "Try it",
   aiNotConfigured: "Voice control is unavailable because the AI connection (NEBIUS_API_KEY) is not configured.",
@@ -390,6 +391,7 @@ const en: Dict = {
   couponCodeLabel: "Code (e.g. SPRING10)", couponKind: "Discount", couponAmount: "Amount", couponValue: "Size", couponCreate: "Create coupon",
   canDoTitle: "What you can do now", canDoReady: "Ready because it's set up", canDoReadyNone: "Nothing yet. Registering your shop or adding a service adds more here.",
   canDoNext: "Set this up to do more", canDoAlways: "Always available by voice ({n})", canDoSay: "Try saying: “{say}”", canDoAuto: "Runs automatically", canDoScreen: "Use it on screen with Open", canDoOpen: "Open", canDoOpenLabel: "Open: {title}",
+  themeTitle: "Appearance", themeLight: "Light", themeDark: "Dark", themeSystem: "Match device", glowBright: "Glow brightness (button and screen edge)",
   moreTitle: "More (bookings, sales, settings)", voiceMore: "Type instead, conversation log", startSimple: "Start",
   growTitle: "Grow your shop and settings", growHint: "Staff, tickets, email suggestions, external calendar, shop group, API keys, subscription. Open when you need them.", thisShop: " (this shop)", bookingsN: "{n} bookings", reservationsCol: "Bookings", noShows: "No-shows",
 };
