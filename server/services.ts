@@ -2,7 +2,7 @@
  * 予約を入れる・取り消すときの一連の流れ。
  * 画面の予約ページ、オーナーの声（AI のツール）、どちらからも同じ関数を呼ぶ。
  */
-import type { Owner, Menu, Language } from "@shared/schema";
+import { ONSITE_METHODS, type Owner, type Menu, type Language, type OnsiteMethod } from "@shared/schema";
 import * as storage from "./storage";
 import { checkBookable, availableSlots, refundEligible, BookingError, type Busy } from "./lib/booking";
 import { candidatesFor, busyFor, orderCandidates } from "./lib/staffing";
@@ -261,17 +261,17 @@ export async function updateReservationFor(owner: Owner, row: storage.Reservatio
   return { reservation: storage.reservationView(updated ?? row, owner.timezone, input.lang) };
 }
 
-export async function recordOnsitePaymentFor(owner: Owner, row: storage.ReservationRow, amountMinor: number, lang: Language) {
+export async function recordOnsitePaymentFor(owner: Owner, row: storage.ReservationRow, amountMinor: number, lang: Language, method: OnsiteMethod = "cash") {
   if (row.status === "cancelled") throw new ApiError("already_cancelled");
   if (row.paymentStatus !== "onsite_pending") throw new ApiError("not_onsite_pending");
   if (amountMinor <= 0) throw new ApiError("validation");
   // メニューなしの予約は、受け取った額がそのまま料金になる
   const noMenu = row.menuId === null;
-  const updated = await storage.updateReservation(owner.id, row.id, { paymentStatus: "onsite_received", amountReceived: amountMinor, status: "completed", ...(noMenu ? { price: amountMinor } : {}) });
+  const updated = await storage.updateReservation(owner.id, row.id, { paymentStatus: "onsite_received", amountReceived: amountMinor, onsiteMethod: method, status: "completed", ...(noMenu ? { price: amountMinor } : {}) });
   return { reservation: storage.reservationView(updated ?? row, owner.timezone, lang), differs: !noMenu && amountMinor !== row.price };
 }
 
-/** 期間の売り上げ：カード・現地払いの内訳、未払いの件数と金額、取り消し件数 */
+/** 期間の売り上げ：カード・現地払いの内訳（現地払いは受け取った方法ごとにも）、未払いの件数と金額、取り消し件数 */
 export async function salesSummaryFor(owner: Owner, from: string, to: string, lang: Language) {
   const rows = await storage.listReservationsByDates(owner.id, owner.timezone, from, to, true);
   const cur = owner.currency;
@@ -280,6 +280,9 @@ export async function salesSummaryFor(owner: Owner, from: string, to: string, la
   const live = (r: storage.ReservationRow) => r.status !== "cancelled";
   const card = sum((r) => live(r) && r.paymentStatus === "paid", (r) => r.amountReceived);
   const onsite = sum((r) => live(r) && r.paymentStatus === "onsite_received", (r) => r.amountReceived);
+  // 方法を記録する前の受け取りは現金として数える
+  const onsiteByMethod = Object.fromEntries(ONSITE_METHODS.map((m) => [m, sum((r) => live(r) && r.paymentStatus === "onsite_received" && (r.onsiteMethod ?? "cash") === m, (r) => r.amountReceived)] as const)
+    .filter(([, v]) => v > 0).map(([m, v]) => [m, money(v, cur, lang)]));
   // 無断キャンセルは未払いに数えない（別に件数を出す）
   const waiting = rows.filter((r) => live(r) && r.status !== "no_show" && (r.paymentStatus === "unpaid" || r.paymentStatus === "onsite_pending"));
   const refundPending = rows.filter((r) => r.status === "cancelled" && r.paymentStatus === "paid");
@@ -287,7 +290,7 @@ export async function salesSummaryFor(owner: Owner, from: string, to: string, la
   const ticketSales = (await storage.listTicketsSold(owner.id, from, to)).reduce((a, t) => a + t.price, 0);
   return {
     from, to, currency: cur,
-    total: money(card + onsite + ticketSales, cur, lang), cardTotal: money(card, cur, lang), onsiteTotal: money(onsite, cur, lang), ticketTotal: money(ticketSales, cur, lang),
+    total: money(card + onsite + ticketSales, cur, lang), cardTotal: money(card, cur, lang), onsiteTotal: money(onsite, cur, lang), onsiteByMethod, ticketTotal: money(ticketSales, cur, lang),
     paidCount: rows.filter((r) => live(r) && (r.paymentStatus === "paid" || r.paymentStatus === "onsite_received" || r.paymentStatus === "ticket")).length,
     waitingCount: waiting.length, waitingAmount: money(waiting.reduce((a, r) => a + r.price, 0), cur, lang),
     cancelledCount: rows.filter((r) => r.status === "cancelled").length,

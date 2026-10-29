@@ -9,7 +9,7 @@
  */
 import type OpenAI from "openai";
 import type { Owner, Language, WeekdayKey, BusinessHours, Staff, NoticePrefs } from "@shared/schema";
-import { DEFAULT_NOTICE, EXPENSE_CATEGORIES } from "@shared/schema";
+import { DEFAULT_NOTICE, EXPENSE_CATEGORIES, ONSITE_METHODS, type OnsiteMethod } from "@shared/schema";
 import { WEEKDAY_KEYS, settingsPatchSchema } from "@shared/schema";
 import { cancelPolicyText, errorMessage, WEEKDAY_LABELS } from "@shared/i18n";
 import { money, toMinor } from "@shared/money";
@@ -53,7 +53,8 @@ const REGISTERED_TOOLS = new Set(["share_booking_link", "create_payment_link", "
 /** 確認なしで実行するが、記録は変わるもの（画面を読み直してもらう） */
 export const QUIET_WRITE_TOOLS = new Set(["set_setup_item", "remember", "forget", "set_notice_preferences"]);
 /** お金や決まりに関わるもの → 合言葉も必要 */
-export const GUARDED_TOOLS = new Set(["update_settings", "update_booking_rules", "cancel_reservation", "record_onsite_payment", "correct_attendance"]);
+// 現地払いの受け取りの記録は「はい」の確認だけ（記録は残り、あとから見直せる）。合言葉までは求めない
+export const GUARDED_TOOLS = new Set(["update_settings", "update_booking_rules", "cancel_reservation", "correct_attendance"]);
 /** 相談モデルへの切り替え（日常モデルが判定して呼ぶ） */
 export const ADVISOR_TOOL = "ask_advisor";
 
@@ -69,6 +70,12 @@ const TIME = { type: "string", description: "時刻 HH:MM（24時間）/ time HH
 const RID = { type: "integer", description: "予約の id（get_today_reservations などの結果にある id）/ reservation id from a listing" };
 const STR = { type: "string" };
 const INT = { type: "integer" };
+/** 現地払いの受け取り方法。わからない値や省いたときは現金 */
+const onsiteMethod = (v: unknown): OnsiteMethod => (ONSITE_METHODS as readonly string[]).includes(String(v)) ? (v as OnsiteMethod) : "cash";
+const ONSITE_METHOD_LABELS: Record<Language, Record<OnsiteMethod, string>> = {
+  ja: { cash: "現金", card: "カード", qr: "QR決済", emoney: "電子マネー", other: "その他の方法" },
+  en: { cash: "cash", card: "card", qr: "QR payment", emoney: "e-money", other: "another method" },
+};
 const MONEY = { type: "number", description: "設定した通貨での普通の金額（5000円なら5000、49.99ドルなら49.99）/ amount in major units" };
 
 export const TOOL_SPECS: Spec[] = [
@@ -154,7 +161,9 @@ export const TOOL_SPECS: Spec[] = [
   fn("add_blocked_slot", "臨時休業や休憩の枠を入れる。start と end を省けば終日。staff_name を渡せば、そのスタッフだけのお休み。", { date: DATE, start: TIME, end: TIME, reason: STR, staff_name: { type: "string", description: "担当・指名のスタッフの名前（スタッフのいる店で、言われたときだけ）" } }, ["date"]),
   fn("delete_blocked_slot", "臨時休業や休憩の枠を取り消す。", { blocked_slot_id: { type: "integer" } }, ["blocked_slot_id"]),
   fn("create_payment_link", "カード前払いの予約に、支払いリンクを作り直す。", { reservation_id: RID }, ["reservation_id"]),
-  fn("record_onsite_payment", "現地払いでお金を受け取ったことを記録する。", { reservation_id: RID, amount: MONEY }, ["reservation_id", "amount"]),
+  fn("record_onsite_payment", "現地払いでお金を受け取ったことを記録する。method は受け取った方法：現金 cash、お店の端末でのカード card、PayPay などの QR 決済 qr、交通系などの電子マネー emoney、それ以外 other。方法を言われなければ cash。", {
+    reservation_id: RID, amount: MONEY, method: { type: "string", enum: [...ONSITE_METHODS] },
+  }, ["reservation_id", "amount"]),
   fn("update_customer", "お客さんの記録を変える。メモを書き足す（add_note）、電話番号・メールアドレス・名前を直す。言われた項目だけ渡す。", {
     customer_id: { type: "integer", description: "お客さんの id（get_customer の結果にある id）/ customer id from get_customer" },
     add_note: { type: "string", description: "書き足すメモ（例: 腰が悪い、強めが好み）" }, phone: STR, email: STR, name: STR,
@@ -869,7 +878,7 @@ const IMPL: Record<string, Impl> = {
   async record_onsite_payment(ctx, a) {
     const row = await requireReservation(ctx, a.reservation_id);
     const amount = toMinor(a.amount as number, row.currency);
-    const r = await recordOnsitePaymentFor(ctx.owner, row, amount, ctx.lang);
+    const r = await recordOnsitePaymentFor(ctx.owner, row, amount, ctx.lang, onsiteMethod(a.method));
     const note = r.differs ? (ctx.lang === "ja"
       ? `料金${money(row.price, row.currency, ctx.lang).display}と受け取り額${money(amount, row.currency, ctx.lang).display}が違います`
       : `The price ${money(row.price, row.currency, ctx.lang).display} and the amount received ${money(amount, row.currency, ctx.lang).display} differ.`) : "";
@@ -917,7 +926,10 @@ export async function describeAction(ctx: ToolContext, name: string, a: Record<s
       return ja ? `${await resLine(a.reservation_id)}の予約を、${parts}に変更する` : `change the booking for ${await resLine(a.reservation_id)} to ${parts}`;
     }
     case "cancel_reservation": return ja ? `${await resLine(a.reservation_id)}の予約を取り消す` : `cancel the booking for ${await resLine(a.reservation_id)}`;
-    case "record_onsite_payment": return ja ? `${await resLine(a.reservation_id)}の現地払いとして、${fmt(a.amount)}を受け取ったと記録する` : `record ${fmt(a.amount)} received on site for ${await resLine(a.reservation_id)}`;
+    case "record_onsite_payment": {
+      const how = ONSITE_METHOD_LABELS[ctx.lang][onsiteMethod(a.method)];
+      return ja ? `${await resLine(a.reservation_id)}の現地払いとして、${how}で${fmt(a.amount)}を受け取ったと記録する` : `record ${fmt(a.amount)} received on site by ${how} for ${await resLine(a.reservation_id)}`;
+    }
     case "create_payment_link": return ja ? `${await resLine(a.reservation_id)}の支払いリンクを作り直す` : `recreate the payment link for ${await resLine(a.reservation_id)}`;
     case "create_menu": return ja ? `メニュー「${a.name}」を${a.minutes}分、${fmt(a.price)}で作る` : `create the menu "${a.name}", ${a.minutes} minutes, ${fmt(a.price)}`;
     case "update_menu": {

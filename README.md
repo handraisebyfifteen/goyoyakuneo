@@ -7,7 +7,7 @@ In Japan, many massage, acupuncture and shiatsu practitioners are blind or have 
 What the owner can do by voice:
 
 - **Bookings**: add, move, cancel, repeat weekly, ask "when am I free tomorrow?"
-- **Money**: hear sales and unpaid amounts. Take a photo of the cash a customer handed over, and the app counts it and works out the change.
+- **Money**: hear sales and unpaid amounts. Record how each customer paid at the shop: cash, card, QR payment such as PayPay, or e-money. A photo of the cash can also be counted, with the change worked out.
 - **Customers**: keep notes ("Tanaka has a bad back"), which are read back before the next visit.
 - **Staff**: clock-ins checked against the plan, payroll, and who can be booked by name.
 - **Shop**: multi-visit tickets, coupons, expenses and profit, follow-up emails to customers who haven't come back.
@@ -56,7 +56,7 @@ new OpenAI({ baseURL: "https://api.tokenfactory.nebius.com/v1/", apiKey: process
 The AI proposes, and code decides. The rules below are enforced in code ([`server/ai/agent.ts`](server/ai/agent.ts)), not by prompt.
 
 - **Every write is confirmed out loud first.** When the model picks a tool that changes data, the server checks the arguments and does not run it. Nemotron writes a one-sentence confirmation, and the owner must answer "yes" (by voice or button) before anything happens. A sentence that does not end as a yes/no question is replaced by a fixed one.
-- **Money and records need a passphrase too.** Cancelling a booking, recording cash received, correcting clock records, and changing settings or booking rules also need the owner's spoken passphrase.
+- **Changes that are hard to undo need a passphrase too.** Cancelling a booking, correcting clock records, and changing settings or booking rules also need the owner's spoken passphrase. Recording a payment at the shop needs only the "yes", because every payment stays in the log and can be checked later.
   - The passphrase is never sent to the AI and never saved in the chat history.
   - After 3 wrong tries, these actions are locked for 5 minutes.
   - A correct passphrase is remembered for 10 minutes.
@@ -67,7 +67,7 @@ The AI proposes, and code decides. The rules below are enforced in code ([`serve
 - **Prank bookings can't block the calendar.**
   - Online card payment is only offered for bookings at least 24 hours ahead. The owner can change this.
   - An online card booking that isn't paid within 30 minutes is cancelled automatically and the time is freed.
-- **Cash counting is advisory.** The vision result is a second check. Recording the money is a separate write that needs confirmation and the passphrase.
+- **Cash counting is advisory.** Japanese notes can be told apart by touch, so the photo is a second check, not the source of truth. Recording the money is a separate write that needs confirmation.
 
 ## Accessibility
 

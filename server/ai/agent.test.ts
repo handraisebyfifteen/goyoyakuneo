@@ -111,9 +111,9 @@ test("合言葉つきのツールは、合言葉が合うまで実行しない�
 });
 
 test("合言葉を3回間違えると5分間止まり、正しい合言葉でも実行しない", async () => {
-  const { deps, executed, lock, tick } = makeDeps(callThenAnswer("record_onsite_payment", { reservation_id: 7, amount: 6000 }));
+  const { deps, executed, lock, tick } = makeDeps(callThenAnswer("cancel_reservation", { reservation_id: 7 }));
   const a = new Agent(deps);
-  let r = await a.message(owner, "受け取りを記録して");
+  let r = await a.message(owner, "予約を取り消して");
   let pid = (r as { pendingId: string }).pendingId;
   await a.confirm(owner, pid, "yes");
   await a.passphrase(owner, pid, "x1");
@@ -123,14 +123,14 @@ test("合言葉を3回間違えると5分間止まり、正しい合言葉でも
   assert.ok(lock.lockedUntil > 0);
   assert.equal(executed.length, 0);
   // ロック中は正しい合言葉でも通らない
-  r = await a.message(owner, "受け取りを記録して");
+  r = await a.message(owner, "予約を取り消して");
   pid = (r as { pendingId: string }).pendingId;
   const r4 = await a.confirm(owner, pid, "yes");
   assert.equal(r4.type, "reply");
   assert.equal(executed.length, 0);
   // 5分経てば、また聞かれる
   tick(5 * 60 * 1000 + 1);
-  r = await a.message(owner, "受け取りを記録して");
+  r = await a.message(owner, "予約を取り消して");
   pid = (r as { pendingId: string }).pendingId;
   const r5 = await a.confirm(owner, pid, "yes");
   assert.equal(r5.type, "passphrase");
@@ -138,7 +138,7 @@ test("合言葉を3回間違えると5分間止まり、正しい合言葉でも
   assert.equal(r6.type, "reply");
   assert.equal(executed.length, 1);
   // 一度合えば10分間は聞き直さない
-  r = await a.message(owner, "受け取りを記録して");
+  r = await a.message(owner, "予約を取り消して");
   pid = (r as { pendingId: string }).pendingId;
   const r7 = await a.confirm(owner, pid, "yes");
   assert.equal(r7.type, "reply");

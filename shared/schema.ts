@@ -52,6 +52,9 @@ export const RESERVATION_STATUSES = ["confirmed", "cancelled", "completed", "no_
 export const SOURCES = ["web", "owner"] as const;
 export const PAYMENT_METHODS = ["card", "onsite"] as const;
 export const PAYMENT_STATUSES = ["unpaid", "paid", "onsite_pending", "onsite_received", "refunded", "ticket"] as const;
+/** 現地払いで受け取った方法。現金のほか、お店の端末のカード、PayPay などの QR 決済、交通系などの電子マネー */
+export const ONSITE_METHODS = ["cash", "card", "qr", "emoney", "other"] as const;
+export type OnsiteMethod = (typeof ONSITE_METHODS)[number];
 export const LANGUAGES = ["ja", "en"] as const;
 /** スタッフの権限。staff は自分の予定と打刻だけ、manager は全員の予定も見られる */
 export const STAFF_ROLES = ["staff", "manager"] as const;
@@ -171,6 +174,8 @@ export const reservations = pgTable(
     paymentMethod: text("payment_method").notNull(),
     paymentStatus: text("payment_status").notNull(),
     amountReceived: integer("amount_received").notNull().default(0),
+    /** 現地払いを受け取った方法（ONSITE_METHODS）。この項目ができる前の記録と、まだ受け取っていない予約は null */
+    onsiteMethod: text("onsite_method"),
     stripeSessionId: text("stripe_session_id"),
     stripePaymentIntentId: text("stripe_payment_intent_id"),
     /** カード払いが済んだ時刻（オーナーに「支払いが済みました」と伝えるため） */
