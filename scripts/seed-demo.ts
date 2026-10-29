@@ -24,7 +24,7 @@ import {
 const lang: Language = process.argv.includes("--lang") && process.argv[process.argv.indexOf("--lang") + 1] === "en" ? "en" : "ja";
 const ja = lang === "ja";
 const EMAIL = (process.env.DEMO_EMAIL ?? "demo@example.com").toLowerCase().trim();
-const PASSWORD = "demo-pass-2026";
+const PASSWORD = "12341234";
 const PASSPHRASE = ja ? "ひだまり" : "sunny room";
 const TZ = "Asia/Tokyo";
 
@@ -73,8 +73,6 @@ async function main() {
     setupState: { done: [...SETUP_ITEMS], skipped: [], asks: {} },
     noticePrefs: { attendance: "all" as const, attendanceEmail: false, paymentEmail: false },
     followupAfterDays: 0,
-    // 開いたときのお知らせは、ここから先の変化だけにする（お客さん側で入れた予約が読み上げられる）
-    lastBriefedAt: new Date(),
   };
   const existing = await storage.getOwnerByEmail(EMAIL);
   let owner;
@@ -142,6 +140,9 @@ async function main() {
     { date: month + "05", amount: 12000, category: "supplies", memo: ja ? "タオル・オイル" : "Towels and oil" },
     { date: month + "10", amount: 9500, category: "utilities", memo: ja ? "電気・水道" : "Power and water" },
   ]) await storage.createExpense({ ownerId: owner.id, ...e });
+
+  // 開いたときのお知らせは、ここから先の変化だけにする。上で入れたネットの予約を「新しい予約」と読み上げないよう、最後に決める
+  await storage.updateOwner(owner.id, { lastBriefedAt: new Date() });
 
   console.log(`\nDemo shop ready (${lang}): ${ja ? SHOP.shopNameJa : SHOP.shopNameEn}`);
   console.log(`  email:      ${EMAIL}`);

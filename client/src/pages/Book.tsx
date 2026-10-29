@@ -85,8 +85,8 @@ export default function Book({ slug }: { slug: string }) {
     return out;
   }, [shop, page]);
 
-  if (shopQ.isError) return <Layout title={t("bookTitle")}><p role="alert">{t("error")}</p></Layout>;
-  if (!shop) return <Layout title={t("bookTitle")}><p>{t("loading")}</p></Layout>;
+  if (shopQ.isError) return <Layout forCustomers title={t("bookTitle")}><p role="alert">{t("error")}</p></Layout>;
+  if (!shop) return <Layout forCustomers title={t("bookTitle")}><p>{t("loading")}</p></Layout>;
 
   // 指名できるスタッフ（そのコースを受けられる人）がいるときだけ「担当を選ぶ」を挟む
   const nominable = (shopQ.data?.staff ?? []).filter((s) => !menu || !s.menuIds || s.menuIds.includes(menu.id));
@@ -108,7 +108,7 @@ export default function Book({ slug }: { slug: string }) {
   }
 
   return (
-    <Layout title={shop.name}>
+    <Layout forCustomers title={shop.name}>
       <div className="max-w-md mx-auto space-y-5">
         <p className="text-sm text-muted-foreground" aria-live="polite">{step !== "done" && `${stepIndex + 1} / ${STEPS.length - 1}`}</p>
 
@@ -200,8 +200,8 @@ export default function Book({ slug }: { slug: string }) {
           <section aria-labelledby="h-confirm" className="space-y-4">
             <h2 id="h-confirm" className="text-xl font-bold">{t("confirmBooking")}</h2>
             <dl className="rounded-lg border-2 p-4 space-y-2">
-              <div className="flex justify-between"><dt>{t("menus")}</dt><dd className="font-semibold">{menu.name} · {t("minutesUnit", { n: menu.minutes })}</dd></div>
-              <div className="flex justify-between"><dt>{t("chooseDate")}</dt><dd className="font-semibold">{fmtDate(date)} {time}</dd></div>
+              <div className="flex justify-between"><dt>{t("confirmMenuLabel")}</dt><dd className="font-semibold">{menu.name} · {t("minutesUnit", { n: menu.minutes })}</dd></div>
+              <div className="flex justify-between"><dt>{t("confirmWhenLabel")}</dt><dd className="font-semibold">{fmtDate(date)} {time}</dd></div>
               {nominable.length > 0 && <div className="flex justify-between"><dt>{t("staffLabel")}</dt><dd className="font-semibold">{nominable.find((x) => x.id === staffId)?.name ?? t("anyStaff")}</dd></div>}
               <div className="flex justify-between"><dt>{t("name")}</dt><dd className="font-semibold">{name}</dd></div>
               <div className="flex justify-between"><dt>{t("phone")}</dt><dd className="font-semibold">{phone}</dd></div>

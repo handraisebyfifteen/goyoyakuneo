@@ -33,7 +33,7 @@ export default function PayResult() {
   const needsGesture = useAnnounce(state === "checking" ? "" : message, speechLang);
 
   return (
-    <Layout title={t("payResultTitle")}>
+    <Layout forCustomers title={t("payResultTitle")}>
       <section aria-live="polite" className="space-y-4">
         <p className="text-xl font-semibold" role="status" data-testid="text-pay-result">{message}</p>
         {state === "paid" && <p className="text-sm text-muted-foreground">{t("payReceiptNote")}</p>}

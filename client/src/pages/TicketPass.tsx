@@ -18,7 +18,7 @@ export default function TicketPass({ token }: { token: string }) {
   const d = q.data;
   const left = d ? (typeof d.ticket.remaining === "number" ? t("passLeftCount", { n: d.ticket.remaining }) : t("passLeftAmount", { amount: d.ticket.remaining.display })) : "";
   return (
-    <Layout title={d ? d.shopName : t("ticketsTitle")}>
+    <Layout forCustomers title={d ? d.shopName : t("ticketsTitle")}>
       {q.error ? <p role="alert" className="text-destructive font-semibold">{t("passNotFound")}</p> : !d ? <p>{t("loading")}</p> : (
         <div className="max-w-sm mx-auto text-center space-y-3 rounded-xl border-2 bg-white p-5 text-black">
           <p className="text-lg font-bold">{d.ticket.name}</p>

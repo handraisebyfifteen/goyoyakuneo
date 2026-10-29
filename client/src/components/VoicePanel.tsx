@@ -34,6 +34,13 @@ const MAX_SHOWN = 14;
 /** 開いている間に、新しい知らせを聞きに行く間隔 */
 const LIVE_MS = 20_000;
 
+/** 「エラー」だけでは何が起きたか分からないので、届かなかった理由（Failed to fetch など）や状態の番号を添える */
+function errorText(e: unknown, fallback: string): string {
+  console.error("[voice]", e);
+  if (e instanceof ApiRequestError) return e.message || `${fallback} (${e.status})`;
+  return `${fallback} (${e instanceof Error ? e.message : String(e)})`;
+}
+
 export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?: () => void; onShareLink?: () => void; onRegister?: () => void }) {
   const { t, lang, speechLang } = useI18n();
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -144,7 +151,7 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
       await handleReply(reply, id);
     } catch (e) {
       if (runId.current !== id) return;
-      const msg = e instanceof ApiRequestError ? e.message : t("error");
+      const msg = errorText(e, t("error"));
       setError(msg);
       flashSignal("ng");
       push({ role: "assistant", text: msg });
@@ -249,7 +256,7 @@ export function VoicePanel({ onChanged, onShareLink, onRegister }: { onChanged?:
       if (continuousRef.current && sttSupported()) void listenForMessage(); else setPhase("idle");
     } catch (e) {
       if (runId.current !== id) return;
-      const msg = e instanceof ApiRequestError ? e.message : t("error");
+      const msg = errorText(e, t("error"));
       setError(msg);
       flashSignal("ng");
       push({ role: "assistant", text: msg });

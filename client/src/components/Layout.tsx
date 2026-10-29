@@ -6,7 +6,8 @@ import { Volume2 } from "lucide-react";
 import { isTouchDevice } from "@/lib/speech";
 import { SignalGlow } from "@/components/SignalGlow";
 
-export function Layout({ children, title, right }: { children: ReactNode; title?: string; right?: ReactNode }) {
+/** forCustomers：お客さん向けの画面（予約ページなど）。お客さん用の「予約の確認」はここにだけ出す（オーナーの画面に出すと迷う） */
+export function Layout({ children, title, right, forCustomers }: { children: ReactNode; title?: string; right?: ReactNode; forCustomers?: boolean }) {
   const { t, lang, setLang } = useI18n();
   return (
     <div className="min-h-screen flex flex-col">
@@ -29,9 +30,11 @@ export function Layout({ children, title, right }: { children: ReactNode; title?
         {title && <h1 className="text-2xl font-bold mb-5">{title}</h1>}
         {children}
       </main>
-      <footer className="py-4 text-center text-sm text-muted-foreground">
-        <Button variant="link" asChild size="sm"><Link href="/lookup">{t("customerLookup")}</Link></Button>
-      </footer>
+      {forCustomers && (
+        <footer className="py-4 text-center text-sm text-muted-foreground">
+          <Button variant="link" asChild size="sm"><Link href="/lookup">{t("customerLookup")}</Link></Button>
+        </footer>
+      )}
       <SignalGlow />
     </div>
   );

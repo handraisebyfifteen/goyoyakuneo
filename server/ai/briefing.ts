@@ -105,7 +105,7 @@ export async function briefingFor(owner: Owner, lang: Language): Promise<{ text:
     else {
       const v = next ? storage.reservationView(next, owner.timezone, lang) : null;
       // 次のお客さんのメモがあれば、最後の1行だけ添える（施術の前に思い出せるように）
-      const note = next?.customer.notes.split("\n").pop()?.replace(/^\d{4}-\d{2}-\d{2}\s*/, "") ?? "";
+      const note = next?.customer.notes.split("\n").pop()?.replace(/^\d{4}-\d{2}-\d{2}\s*/, "").replace(/[。.．!！]+$/, "") ?? ""; // 文末の句点は下で足す
       parts.push(ja
         ? `今日の予約は${rows.length}件です。${v ? `次は${spokenTime(v.time)}から${v.customerName}さんです。${note ? `メモ：${note}。` : ""}` : "今日の予約はすべて終わっています。"}`
         : `${rows.length} booking${rows.length > 1 ? "s" : ""} today. ${v ? `Next is ${v.customerName} at ${v.time}.${note ? ` Note: ${note}.` : ""}` : "All of today's bookings are done."}`);
